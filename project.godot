@@ -1,0 +1,29 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=5
+
+[application]
+
+config/name="fluid_simulation_csharp"
+run/main_scene="res://scenes/main.tscn"
+run/disable_stdout=true
+config/features=PackedStringArray("4.3", "C#", "Forward Plus")
+config/icon="res://assets/icon.png"
+
+[dotnet]
+
+project/assembly_name="New Game Project"
+
+[physics]
+
+2d/physics_engine="Rapier2D"
+
+[rendering]
+
+textures/vram_compression/import_etc2_astc=true

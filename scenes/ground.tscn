@@ -1,0 +1,60 @@
+[gd_scene load_steps=6 format=3 uid="uid://bplaqc5lnarr5"]
+
+[ext_resource type="Script" path="res://scenes/Ground.cs" id="1_5u2c2"]
+[ext_resource type="Texture2D" uid="uid://d0pxmr1gaf27i" path="res://assets/line.svg" id="1_xeupf"]
+[ext_resource type="PackedScene" uid="uid://bn6ekmm1h0t72" path="res://scenes/ball.tscn" id="2_mso10"]
+
+[sub_resource type="WorldBoundaryShape2D" id="WorldBoundaryShape2D_ahx4j"]
+
+[sub_resource type="RectangleShape2D" id="RectangleShape2D_bgv51"]
+size = Vector2(20, 4.18009)
+
+[node name="Ground" type="StaticBody2D"]
+position = Vector2(535, 604)
+scale = Vector2(0.99048, 0.973534)
+script = ExtResource("1_5u2c2")
+ball_scene = ExtResource("2_mso10")
+pressure_stiffness = 0.05
+target_density = 0.003
+vicosity_gain = 300.0
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="."]
+position = Vector2(52.4998, 36.9787)
+scale = Vector2(6.3247, 2.59002)
+shape = SubResource("WorldBoundaryShape2D_ahx4j")
+
+[node name="Sprite2D" type="Sprite2D" parent="CollisionShape2D"]
+scale = Vector2(0.32, 1)
+texture = ExtResource("1_xeupf")
+
+[node name="CollisionShape2D2" type="CollisionShape2D" parent="."]
+position = Vector2(221.769, -299.08)
+rotation = -1.5708
+scale = Vector2(3.76782, 1.79085)
+shape = SubResource("WorldBoundaryShape2D_ahx4j")
+
+[node name="Sprite2D" type="Sprite2D" parent="CollisionShape2D2"]
+scale = Vector2(0.32, 1)
+texture = ExtResource("1_xeupf")
+
+[node name="CollisionShape2D4" type="CollisionShape2D" parent="."]
+position = Vector2(76, -598)
+rotation = 3.14159
+scale = Vector2(8.70685, 6.7082)
+shape = SubResource("WorldBoundaryShape2D_ahx4j")
+
+[node name="Sprite2D" type="Sprite2D" parent="CollisionShape2D4"]
+position = Vector2(-7.62939e-06, -7.62939e-06)
+scale = Vector2(0.281667, 0.558749)
+texture = ExtResource("1_xeupf")
+
+[node name="CollisionShape2D5" type="CollisionShape2D" parent="."]
+position = Vector2(-193.845, -233.171)
+rotation = 1.5708
+scale = Vector2(27.0165, -1.50059)
+shape = SubResource("RectangleShape2D_bgv51")
+
+[node name="Sprite2D" type="Sprite2D" parent="CollisionShape2D5"]
+position = Vector2(0, -2.01896)
+scale = Vector2(0.034127, 1.96584)
+texture = ExtResource("1_xeupf")

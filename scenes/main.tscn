@@ -1,0 +1,32 @@
+[gd_scene load_steps=6 format=3 uid="uid://be8ticxudt62q"]
+
+[ext_resource type="Shader" path="res://scenes/main.gdshader" id="1_2obhn"]
+[ext_resource type="Script" path="res://scenes/Color_Rect.cs" id="2_gl22a"]
+[ext_resource type="PackedScene" uid="uid://bplaqc5lnarr5" path="res://scenes/ground.tscn" id="2_j27gb"]
+[ext_resource type="Texture2D" uid="uid://c32ksy71405n4" path="res://assets/angry.png" id="4_jcanm"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_a5633"]
+shader = ExtResource("1_2obhn")
+shader_parameter/ball_position_uv = null
+shader_parameter/hint_color = Vector4(0, 0, 1, 1)
+
+[node name="main" type="Node2D"]
+
+[node name="ColorRect" type="ColorRect" parent="."]
+material = SubResource("ShaderMaterial_a5633")
+offset_left = 1.0
+offset_top = -1.0
+offset_right = 1153.0
+offset_bottom = 1151.0
+scale = Vector2(1.00513, 1)
+script = ExtResource("2_gl22a")
+
+[node name="Ground" parent="." instance=ExtResource("2_j27gb")]
+position = Vector2(537, 598)
+target_density = 0.004
+vicosity_gain = 150.0
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+show_behind_parent = true
+position = Vector2(568, 494)
+texture = ExtResource("4_jcanm")
