@@ -16,11 +16,11 @@ public partial class Ground : StaticBody2D
 {
 	/*Built-in types.*/
 	[Export] public PackedScene ball_scene { get; set; }
-	[Export(PropertyHint.Range, "0,100,")] public float smoothing_length { get; set; } = 25;
-	[Export] public float pressure_stiffness { get; set; } = 0.01f;
-	[Export(PropertyHint.Range, "0.001,0.05,")] public double target_density { get; set; } = 0.005;
-	[Export] public float vicosity_gain { get; set; } = 0.5f;
-
+	[Export(PropertyHint.Range, "0,100,")] public float smoothing_length { get; set; } = 17.5f;
+	[Export] public float pressure_stiffness { get; set; } = 0.001f;
+	[Export(PropertyHint.Range, "0.001,0.05,")] public double target_density { get; set; } = 0.007;
+	[Export] public float vicosity_gain { get; set; } = 250f;
+	[Export] public int gamma_ { get; set; } = 7;
 	/*global predefined variables*/
 	private bool simulation_start_ = false;
 	private List<Ball> ball_array_ = new List<Ball>();
@@ -32,7 +32,6 @@ public partial class Ground : StaticBody2D
 	Vector2 mouse_position_ = Vector2.Zero;
 
 	//pressure calculation parameters
-	private int gamma_ = 7;
 	// #real 2d water density is 1000 kg/(m^2)
 	// #since 1m = 100 unit
 	// #1000 kg/(m^2) = 0.1 kg/(unit^2)
@@ -66,7 +65,7 @@ public partial class Ground : StaticBody2D
 		// 计算行列数（假设粒子总数是平方数）
 		int rows = (int)Mathf.Sqrt(ball_nums_);
 		int cols =( ball_nums_ -1) / rows +1;
-		float spacing = 10;
+		float spacing = 15;
 		for (int i = 0; i < ball_nums_; i++)
 		{
 			ball_array_.Add(ball_scene.Instantiate() as Ball);
@@ -223,8 +222,8 @@ public partial class Ground : StaticBody2D
 		}
 	}
 
-    public override void _PhysicsProcess(double delta)
-    {
+	public override void _PhysicsProcess(double delta)
+	{
 		// GD.Print("-----------_PhysicsProcess started------------");
 		// ulong start_time = Time.GetTicksMsec();
 		for (int i = 0; i < ball_nums_; i++)

@@ -1,29 +1,20 @@
-[gd_scene load_steps=8 format=3 uid="uid://bplaqc5lnarr5"]
+[gd_scene load_steps=6 format=3 uid="uid://bplaqc5lnarr5"]
 
 [ext_resource type="Script" path="res://scenes/Ground.cs" id="1_5u2c2"]
 [ext_resource type="Texture2D" uid="uid://d0pxmr1gaf27i" path="res://assets/line.svg" id="1_xeupf"]
 [ext_resource type="PackedScene" uid="uid://bn6ekmm1h0t72" path="res://scenes/ball.tscn" id="2_mso10"]
-[ext_resource type="Script" path="res://scenes/CollisionShape2d3.cs" id="4_rwlny"]
 
 [sub_resource type="WorldBoundaryShape2D" id="WorldBoundaryShape2D_ahx4j"]
 
 [sub_resource type="WorldBoundaryShape2D" id="WorldBoundaryShape2D_t2snt"]
 
-[sub_resource type="RectangleShape2D" id="RectangleShape2D_fdit4"]
-size = Vector2(656, 20)
-
 [node name="Ground" type="StaticBody2D"]
-position = Vector2(2, 15)
-scale = Vector2(1.00035, 0.996252)
 script = ExtResource("1_5u2c2")
 ball_scene = ExtResource("2_mso10")
-smoothing_length = 17.5
-pressure_stiffness = 0.001
-target_density = 0.007
-vicosity_gain = 250.0
+vicosity_gain = 50.0
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="."]
-position = Vector2(573, 618)
+position = Vector2(575, 629)
 scale = Vector2(6.3247, 2.59002)
 shape = SubResource("WorldBoundaryShape2D_ahx4j")
 
@@ -32,9 +23,9 @@ scale = Vector2(0.32, 1)
 texture = ExtResource("1_xeupf")
 
 [node name="CollisionShape2D2" type="CollisionShape2D" parent="."]
-position = Vector2(913.68, 327.226)
+position = Vector2(1155, 292)
 rotation = -1.5708
-scale = Vector2(3.36397, 1.79085)
+scale = Vector2(3.68386, 1.79085)
 shape = SubResource("WorldBoundaryShape2D_ahx4j")
 
 [node name="Sprite2D" type="Sprite2D" parent="CollisionShape2D2"]
@@ -42,7 +33,7 @@ scale = Vector2(0.32, 1.00422)
 texture = ExtResource("1_xeupf")
 
 [node name="CollisionShape2D4" type="CollisionShape2D" parent="."]
-position = Vector2(599, 35)
+position = Vector2(595.792, -15.0564)
 rotation = 3.14159
 scale = Vector2(8.70685, 6.7082)
 shape = SubResource("WorldBoundaryShape2D_ahx4j")
@@ -53,22 +44,12 @@ scale = Vector2(0.281667, 0.558749)
 texture = ExtResource("1_xeupf")
 
 [node name="CollisionShape2D5" type="CollisionShape2D" parent="."]
-position = Vector2(214.925, 332.245)
+position = Vector2(4, 309)
 rotation = 1.5708
-scale = Vector2(3.26641, 3.72657)
+scale = Vector2(3.70626, 3.72657)
 shape = SubResource("WorldBoundaryShape2D_t2snt")
 
 [node name="Sprite2D" type="Sprite2D" parent="CollisionShape2D5"]
 position = Vector2(0, 0.812981)
 scale = Vector2(0.324167, -0.791592)
-texture = ExtResource("1_xeupf")
-
-[node name="CollisionShape2D3" type="CollisionShape2D" parent="."]
-position = Vector2(565, 327.334)
-scale = Vector2(1, 2.56587)
-shape = SubResource("RectangleShape2D_fdit4")
-script = ExtResource("4_rwlny")
-
-[node name="Sprite2D" type="Sprite2D" parent="CollisionShape2D3"]
-scale = Vector2(1.12, 4.00399)
 texture = ExtResource("1_xeupf")

@@ -16,10 +16,10 @@ using System.Threading.Tasks;
 public partial class Ground : StaticBody2D
 {
     int[] hash_values;
-    List<List<int>> hash_values_neighbors = new List<List<int>>();
+    Vector2I[] grid_cell_coord;
+    Vector2I[] grid_cell_neighbor_offsets;
     float grid_cell_size;
     float grid_cell_inverse;
-    int grid_cell_nums_x, grid_cell_nums_y;
     int[] hash_values_st, hash_values_ed;
     int big_num;
 
@@ -29,50 +29,40 @@ public partial class Ground : StaticBody2D
         public int index { get; set; }        
     }
     HashValueIndexBind[] hash_values_sorted;
-    
+
     public void HashInit()
     {
         hash_values = new int[ball_nums_];
+        grid_cell_coord = new Vector2I[ball_nums_];
         grid_cell_size = 2 * smoothing_length;
         grid_cell_inverse = 1 / grid_cell_size;
-        grid_cell_nums_x = (int)Math.Ceiling(GetViewportRect().Size.X * grid_cell_inverse);
-
-        grid_cell_nums_y = (int)Math.Ceiling(GetViewportRect().Size.Y * grid_cell_inverse);
-        int grid_cell_nums = grid_cell_nums_x * grid_cell_nums_y;
-        big_num = 10 * grid_cell_nums;
-        hash_values_st = new int[grid_cell_nums];
-        hash_values_ed = new int[grid_cell_nums];
-        //Fill hash_values_st with extreme big values at the begin.
-        Array.Fill(hash_values, big_num);
-        for (int hash_value = 0; hash_value < grid_cell_nums; hash_value++)
+        big_num = 10 * ball_nums_;
+        hash_values_st = new int[ball_nums_];
+        hash_values_ed = new int[ball_nums_];
+        grid_cell_neighbor_offsets = new Vector2I[9];
+        for (int offset_y = 0; offset_y < 3; offset_y++)
         {
-            hash_values_neighbors.Add(new List<int>());
-            for (int i = 0; i <= 2*grid_cell_nums_x; i+=grid_cell_nums_x)
+            for (int offset_x = 0; offset_x < 3; offset_x++)
             {
-                for (int j = 0; j < 3; j++)
-                {
-                    int neighbor_hash_value = hash_value - grid_cell_nums_x - 1 + i + j;
-                    if (neighbor_hash_value >= 0 && neighbor_hash_value<=grid_cell_nums - 1)
-                        hash_values_neighbors[hash_value].Add(neighbor_hash_value);
-                }
+                grid_cell_neighbor_offsets[offset_y * 3 + offset_x][0] = offset_x - 1;
+                grid_cell_neighbor_offsets[offset_y * 3 + offset_x][1] = offset_y - 1;
             }
         }
+  
 
     }
 
 
-    //Use Parallel.for to call this function!
+
+
+    //Matthias Muller Spatial Hashing function
     public void GetHashValue(int index)
     {
-        Vector2I ixiy = (Vector2I)(ball_position_[index] * grid_cell_inverse);
-        hash_values[index] = ixiy[1] * grid_cell_nums_x + ixiy[0];
-    //     GD.Print("ball_position_[index]", ball_position_[index]);
-    //     GD.Print("未圆整", ball_position_[index] * grid_cell_inverse);
-    //     GD.Print("圆整", (Vector2I)(ball_position_[index] * grid_cell_inverse));
-
+        grid_cell_coord[index] = (Vector2I)(ball_position_[index] * grid_cell_inverse);
+        hash_values[index] = Math.Abs((grid_cell_coord[index][0] * 1789) ^
+                                    (grid_cell_coord[index][1] * 31))
+                                    % ball_nums_;
     }
-
-    //
     public void Hashing()
     {
         //Prepare,refill hash_values with big number
@@ -81,6 +71,7 @@ public partial class Ground : StaticBody2D
         //Step1. Calculate hash values of all particles.
         Parallel.For(0, ball_nums_, i =>
         {
+            // GetHashValue(i);
             GetHashValue(i);
         });
         //Step2. Bind particel hash value and its index,sort them by hash value.
@@ -110,30 +101,26 @@ public partial class Ground : StaticBody2D
     public List<int> NeighborhoodSearch(int index)
     {
         List<int> neighbor_idx_list = new List<int>();
-        //Step1. get the neignbor particle indexes according to index
-        var neignbors = hash_values_neighbors[hash_values[index]];
-        // GD.Print("hash_values[index]: ", hash_values[index]);
-        // for (int i = 0; i < neignbors.Count; i++)
-        // {
-        //     GD.Print("neignbors ", neignbors[i]);
-        // }
-        // GD.Print("----");
-        for (int i = 0; i < neignbors.Count; i++)
+        for (int i = 0; i < grid_cell_neighbor_offsets.Length; i++)
         {
-            var ith_neighbor = neignbors[i];
-            for (int j = hash_values_st[ith_neighbor]; j <= hash_values_ed[ith_neighbor]; j++)
+            Vector2I neighbor_grid_cell_coord = grid_cell_coord[index] + grid_cell_neighbor_offsets[i];
+            int neighbor_hash_value = Math.Abs((neighbor_grid_cell_coord[0] * 1789) ^
+                                            (neighbor_grid_cell_coord[1] * 31))
+                                            % ball_nums_;
+            for (int j = hash_values_st[neighbor_hash_value]; j <= hash_values_ed[neighbor_hash_value]; j++)
             {
                 if (j != big_num)
-                    neighbor_idx_list.Add(hash_values_sorted[j].index);
+                {
+                    if ((ball_position_[hash_values_sorted[j].index] - ball_position_[index]).Length()
+                        < grid_cell_size)
+                    {
+                        neighbor_idx_list.Add(hash_values_sorted[j].index);
+                    }
+
+                }
             }
+
         }
-        
-        //  GD.Print("index", index);
-        //  GD.Print("neighbor nums", neighbor_idx_list.Count);
-        //  for (int i = 0; i < neighbor_idx_list.Count; i++)
-        //  {
-        //      GD.Print("neighbor ", i, " index : ", neighbor_idx_list[i]);
-        //  }
         return neighbor_idx_list;
     }
 }
