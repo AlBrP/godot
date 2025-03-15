@@ -12,7 +12,6 @@ config_version=5
 
 config/name="fluid_simulation_csharp"
 run/main_scene="res://scenes/main.tscn"
-run/disable_stdout=true
 config/features=PackedStringArray("4.3", "C#", "Forward Plus")
 config/icon="res://assets/icon.png"
 

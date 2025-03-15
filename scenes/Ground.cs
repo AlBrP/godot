@@ -24,8 +24,8 @@ public partial class Ground : StaticBody2D
 	/*global predefined variables*/
 	private bool simulation_start_ = false;
 	private List<Ball> ball_array_ = new List<Ball>();
-	public const int ball_nums_ = 450;
-	private const int looking_idx_ = 300;
+	public const int ball_nums_ = 1200;
+	private const int looking_idx_ = 0;
 	private ulong random_seed_ = 10;
 	public Vector2[] ball_position_ = new Vector2[ball_nums_];
 	bool mouse_pressed_ = false;
@@ -46,8 +46,8 @@ public partial class Ground : StaticBody2D
 	// Called when the node enters the scene tree for the first time.
 	public override void _Ready()
 	{
-		var wind = GetWindow();
-		wind.Size = new Vector2I(1920, 1080);
+		// var wind = GetWindow();
+		// wind.Size = new Vector2I(1920, 1080);
 		RandomNumberGenerator rng = new RandomNumberGenerator();
 		rng.Seed = random_seed_;
 
@@ -66,20 +66,21 @@ public partial class Ground : StaticBody2D
 		// 计算行列数（假设粒子总数是平方数）
 		int rows = (int)Mathf.Sqrt(ball_nums_);
 		int cols =( ball_nums_ -1) / rows +1;
-		float spacing = 15;
+		float spacing = 10;
 		for (int i = 0; i < ball_nums_; i++)
 		{
 			ball_array_.Add(ball_scene.Instantiate() as Ball);
 			AddChild(ball_array_[i]);
-		    float x = (i%rows -rows/2f+0.5f) * spacing;
-		    float y = (i/rows -cols/2f+0.5f) * spacing-400;
-			ball_array_[i].Position = new Vector2(x,y);
+			float x = (i % rows - rows / 2f + 0.5f) * spacing + ball_rand_x_max/2;
+			float y = (i / rows - cols / 2f + 0.5f) * spacing + ball_rand_y_max/2;
+			ball_array_[i].Position = new Vector2(x, y);
 		}
 		Button button  = new Button();
 		button.Text = "Press To Start Simulation!";
-		button.Position = new Vector2(ball_rand_x_max * 0.25f,-ball_rand_y_max * 0.9f);
+		button.Position = new Vector2(ball_rand_x_max/2,0);
 		button.Pressed +=_ButtonPressed;
 		AddChild(button);
+		HashInit();
 	}
 	//fluid simulation used functions
 	public float SmoothingKernel(float h, float dst){
@@ -119,10 +120,11 @@ public partial class Ground : StaticBody2D
 	public void CalculateDensity(int index)
 	{
 		ball_array_[index].density = 0;
-		for (int i = 0; i < ball_nums_; i++)
+		var neighbor_idx_list = NeighborhoodSearch(index);
+		for (int i = 0; i < neighbor_idx_list.Count; i++)
 		{
-			var dst = (ball_position_[i] - ball_position_[index]).Length();
-			ball_array_[index].density += ball_array_[i].Mass * SmoothingKernel(smoothing_length, dst);
+			var dst = (ball_position_[neighbor_idx_list[i]] - ball_position_[index]).Length();
+			ball_array_[index].density += ball_array_[neighbor_idx_list[i]].Mass * SmoothingKernel(smoothing_length, dst);
 		}
 
 	}
@@ -145,17 +147,18 @@ public partial class Ground : StaticBody2D
 		float index_pressure = CalculatePressure(ball_array_[index].density);
 		Vector2 acc = Vector2.Zero,
 				viscosity_force = Vector2.Zero;
-		for (int i = 0; i < ball_nums_; i++)
+		var neighbor_idx_list = NeighborhoodSearch(index);
+		for (int i = 0; i < neighbor_idx_list.Count; i++)
 		{
 
-			float i_pressure = CalculatePressure(ball_array_[i].density);
-			Vector2 dir_vec = ball_position_[i] - ball_position_[index];
+			float i_pressure = CalculatePressure(ball_array_[neighbor_idx_list[i]].density);
+			Vector2 dir_vec = ball_position_[neighbor_idx_list[i]] - ball_position_[index];
 			float dst = dir_vec.Length();
-			acc += ball_array_[i].Mass * (
+			acc += ball_array_[neighbor_idx_list[i]].Mass * (
 				index_pressure / ball_array_[index].density / ball_array_[index].density +
-				i_pressure / ball_array_[i].density / ball_array_[i].density) *
+				i_pressure / ball_array_[neighbor_idx_list[i]].density / ball_array_[neighbor_idx_list[i]].density) *
 				dir_vec.Normalized() * SmoothingKernelDerivative(smoothing_length, dst);
-			viscosity_force += CalculateViscosityForce(index, i, smoothing_length);
+			viscosity_force += CalculateViscosityForce(index, neighbor_idx_list[i], smoothing_length);
 
 		}
 		ball_array_[index].pressure = acc * ball_array_[index].Mass + viscosity_force;
@@ -187,7 +190,7 @@ public partial class Ground : StaticBody2D
 		// 	(ball_array_[i].GetChild(0).GetChild(0) as CanvasItem).SelfModulate = color;
 		// }
 		// DrawLine(ball_position_[looking_idx_], mouse_position_, Colors.Red, 2);
-		float circle_radius = smoothing_length * 2.0f;
+		float circle_radius =35.0f * 2.0f;
 		var circle_color = new Godot.Color(255,0,0,0.5f);
 
 		DrawArc(mouse_position_, circle_radius, 0, (float)(2 * Math.PI), 32, circle_color, 6.0f, false);
@@ -207,7 +210,7 @@ public partial class Ground : StaticBody2D
 			for (int i = 0; i < ball_nums_; i++)
 			{
 				float len = (mouse_position_ - ball_position_[i]).Length();
-				float r_interaction = smoothing_length * 2.0f;
+				float r_interaction = 35.0f * 2.0f;
 				float kp = 6000;
 				if (len < r_interaction)
 				{
@@ -228,8 +231,8 @@ public partial class Ground : StaticBody2D
 		{
 			ball_position_[i] = ball_array_[i].Position + (float)delta * ball_array_[i].LinearVelocity;
 		}
-		;
-		Parallel.For(0,ball_nums_, i =>
+		Hashing();
+		Parallel.For(0, ball_nums_, i =>
 		{
 			CalculateDensity(i);
 		});
@@ -241,5 +244,5 @@ public partial class Ground : StaticBody2D
 		// GD.Print("density = ",ball_array_[looking_idx_].density);
 		// GD.Print("takes ",Time.GetTicksMsec() - start_time ," ms");	
 		// GD.Print("-----------_PhysicsProcess ended------------");
-    }
+	}
 }

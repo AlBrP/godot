@@ -1,10 +1,10 @@
 shader_type canvas_item;
 //TODO use global uniform
-uniform vec2 ball_position_uv[450];
+uniform vec2 ball_position_uv[1200];
 uniform vec4 hint_color = vec4(1.0);
 uniform sampler2D SCREEN_TEXTURE:hint_screen_texture,filter_linear_mipmap;
 
-void fragment() 
+void fragment()
 {
 	//vec4 color = texture(SCREEN_TEXTURE,SCREEN_UV);
 	//color = mix(color,hint_color,0.5);
@@ -13,20 +13,20 @@ void fragment()
 	for (int i = 0; i < ball_position_uv.length(); i++) {
 		float dst = length(UV - ball_position_uv[i]);
 		weight += 0.000015/(dst*dst);
-	if(weight > 0.85){
+	if(weight > 5.0){
 		vec4 color = texture(SCREEN_TEXTURE,SCREEN_UV);
 		vec4 water = vec4(0.15,0.58,0.78,1.0);
 		color = mix(color,water,0.4);
 		color = mix(vec4(0.5),color,1.5);
-		COLOR =color;	
+		COLOR =color;
 		}
-	else if(weight<0.85 && weight>0.83){
+	else if(weight<5.0 && weight>4.5){
 		COLOR = vec4(0.8,1,1,1.0);
 	}
 	else{
 		COLOR = vec4(0,0,0,0);
 	}
-		
+
 }
 }
 
