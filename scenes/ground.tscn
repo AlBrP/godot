@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" path="res://scenes/Ground.cs" id="1_5u2c2"]
 [ext_resource type="Texture2D" uid="uid://d0pxmr1gaf27i" path="res://assets/line.svg" id="1_xeupf"]
-[ext_resource type="PackedScene" uid="uid://bn6ekmm1h0t72" path="res://scenes/ball.tscn" id="2_mso10"]
+[ext_resource type="Texture2D" uid="uid://dduohjitbjjtf" path="res://assets/ball.svg" id="2_ball"]
 
 [sub_resource type="WorldBoundaryShape2D" id="WorldBoundaryShape2D_ahx4j"]
 
@@ -10,8 +10,7 @@
 
 [node name="Ground" type="StaticBody2D"]
 script = ExtResource("1_5u2c2")
-ball_scene = ExtResource("2_mso10")
-vicosity_gain = 50.0
+particle_texture = ExtResource("2_ball")
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="."]
 position = Vector2(575, 629)

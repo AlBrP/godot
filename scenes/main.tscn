@@ -8,6 +8,7 @@
 shader = ExtResource("1_2obhn")
 shader_parameter/ball_position_uv = null
 shader_parameter/hint_color = Vector4(0, 0, 1, 1)
+shader_parameter/render_enabled = true
 
 [node name="main" type="Node2D"]
 
