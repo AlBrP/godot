@@ -4,13 +4,13 @@ using System;
 public partial class Color_Rect : ColorRect
 {
 	Ground ground_;
-	Vector2[] ball_position_uv = new Vector2[2000];
+	Vector2[] ball_position_uv = new Vector2[5000];
 	Vector2 ground_position_;
 	float inv_size_x_;
 	float inv_size_y_;
 
 	// 渲染开关（true = Metaball, false = 粒子精灵）
-	private bool metaball_enabled_ = true;
+	private bool metaball_enabled_ = false;
 
 	public bool MetaballEnabled => metaball_enabled_;
 

@@ -17,6 +17,10 @@ public partial class Ground : StaticBody2D
     private int[] sorted_indices;
     private int[] sorted_hashes;
 
+    // 哈希常数（参考 Fluid-Sim）
+    private const int HASH_K1 = 15823;
+    private const int HASH_K2 = 9737333;
+
     // 自定义比较器
     private sealed class HashComparer : IComparer<int>
     {
@@ -31,7 +35,7 @@ public partial class Ground : StaticBody2D
     {
         hash_values = new int[ball_nums_];
         grid_cell_coord = new Vector2I[ball_nums_];
-        grid_cell_size = 2 * smoothing_length;
+        grid_cell_size = smoothing_radius;
         grid_cell_inverse = 1f / grid_cell_size;
         big_num = 10 * ball_nums_;
         hash_values_st = new int[ball_nums_];
@@ -52,10 +56,27 @@ public partial class Ground : StaticBody2D
         }
     }
 
+    // 获取单元格坐标（使用 floor 正确处理负数）
+    private Vector2I GetCell(Vector2 pos)
+    {
+        return new Vector2I(
+            (int)MathF.Floor(pos.X * grid_cell_inverse),
+            (int)MathF.Floor(pos.Y * grid_cell_inverse)
+        );
+    }
+
+    // 哈希函数（参考 Fluid-Sim）
+    private int HashCell(Vector2I cell)
+    {
+        uint a = (uint)(cell.X * HASH_K1);
+        uint b = (uint)(cell.Y * HASH_K2);
+        return (int)((a + b) % ball_nums_);
+    }
+
     private void GetHashValue(int index)
     {
-        grid_cell_coord[index] = (Vector2I)(pos_[index] * grid_cell_inverse);
-        hash_values[index] = Math.Abs((grid_cell_coord[index].X * 1789) ^ (grid_cell_coord[index].Y * 31)) % ball_nums_;
+        grid_cell_coord[index] = GetCell(predicted_pos_[index]);
+        hash_values[index] = HashCell(grid_cell_coord[index]);
     }
 
     public void Hashing()
@@ -101,7 +122,7 @@ public partial class Ground : StaticBody2D
         for (int i = 0; i < grid_cell_neighbor_offsets.Length; i++)
         {
             Vector2I neighbor_cell = grid_cell_coord[index] + grid_cell_neighbor_offsets[i];
-            int neighbor_hash = Math.Abs((neighbor_cell.X * 1789) ^ (neighbor_cell.Y * 31)) % ball_nums_;
+            int neighbor_hash = HashCell(neighbor_cell);
 
             int start = hash_values_st[neighbor_hash];
             int end = hash_values_ed[neighbor_hash];
@@ -111,7 +132,7 @@ public partial class Ground : StaticBody2D
             for (int j = start; j <= end; j++)
             {
                 int neighbor_idx = sorted_indices[j];
-                Vector2 diff = pos_[neighbor_idx] - pos_[index];
+                Vector2 diff = predicted_pos_[neighbor_idx] - predicted_pos_[index];
                 if (diff.LengthSquared() < cell_size_sq)
                 {
                     if (count < MAX_NEIGHBORS)
