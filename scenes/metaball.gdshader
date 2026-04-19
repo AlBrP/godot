@@ -30,6 +30,9 @@ uniform vec3 water_foam      = vec3(0.95, 0.98, 1.00);
 uniform vec3 water_spec      = vec3(1.00, 1.00, 1.00);
 uniform float time = 0.0;
 
+uniform float spec_strength = 0.5;
+uniform float toon_levels = 0.0;  // 0=关闭(连续渐变), >0=量化色阶数
+
 uniform int debug_mode = 0;
 
 // 哈希常数（必须与C#端一致）
@@ -131,6 +134,11 @@ void fragment() {
 
 		float n = total * field_scale;
 
+		// Toon量化：将连续n映射到离散色阶
+		if (toon_levels > 0.5) {
+			n = floor(n * toon_levels) / toon_levels;
+		}
+
 		float rim = smoothstep(2.5, 4.0, total);
 		vec3 rim_color = mix(water_foam, water_bright, rim);
 
@@ -164,6 +172,12 @@ void fragment() {
 		foam = clamp(foam, 0.0, 1.0);
 
 		color = mix(color, water_foam, foam);
+
+		// 速度驱动高光：流速越快越亮
+		float vel_mag = length(avg_vel);
+		float spec = smoothstep(0.005, 0.06, vel_mag);
+		spec *= (0.4 + 0.6 * pow(max(dot(normalize(avg_vel + vec2(0.0001)), vec2(0.35, -0.6)), 0.0), 2.0));
+		color = mix(color, water_spec, spec * spec_strength);
 
 		COLOR = vec4(clamp(color, 0.0, 1.0), aa);
 	}

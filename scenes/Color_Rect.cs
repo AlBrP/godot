@@ -121,6 +121,8 @@ public partial class Color_Rect : ColorRect
 		shaderMaterial.SetShaderParameter("density_scale", (double)ground_.density_scale);
 		shaderMaterial.SetShaderParameter("edge_sharpness", (double)ground_.edge_sharpness);
 		shaderMaterial.SetShaderParameter("field_scale", (double)ground_.field_scale);
+		shaderMaterial.SetShaderParameter("spec_strength", (double)ground_.spec_strength);
+		shaderMaterial.SetShaderParameter("toon_levels", (double)ground_.toon_levels);
 		shaderMaterial.SetShaderParameter("time", Time.GetTicksMsec() / 1000.0f);
 
 		// viewport_size: shader用它把屏幕UV转成世界坐标

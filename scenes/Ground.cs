@@ -23,10 +23,20 @@ public partial class Ground : StaticBody2D
 	[Export] public float edge_threshold { get; set; } = 3.8f;
 	[Export] public float stretch_scale { get; set; } = 0.012f;
 	[Export] public float density_scale { get; set; } = 0.3f;
-	[Export] public float field_scale { get; set; } = 0.008f;
+	[Export] public float field_scale { get; set; } = 0.018f;
 
 	// 卡通水参数（已简化）
 	[Export] public float edge_sharpness { get; set; } = 0.78f;  // 越高边缘越窄锐利
+	[Export] public float spec_strength { get; set; } = 0.5f;  // 速度高光强度，0=关闭
+	[Export] public float toon_levels { get; set; } = 0f;     // Toon量化色阶数，0=连续渐变
+
+	// 运行时滑块面板
+	private bool show_sliders_ = false;
+	private Panel slider_panel_;
+	private HSlider toon_slider_;
+	private Label toon_label_;
+	private HSlider spec_slider_;
+	private Label spec_label_;
 
 	// 粒子数量
 	public const int ball_nums_ = 5000;
@@ -136,6 +146,54 @@ public partial class Ground : StaticBody2D
 
 		// 默认开启metaball渲染，隐藏粒子精灵
 		SetParticleSpritesVisible(false);
+
+		// 创建运行时滑块面板
+		CreateSliderPanel();
+	}
+
+	private void CreateSliderPanel()
+	{
+		slider_panel_ = new Panel();
+		slider_panel_.Position = new Vector2(10, 10);
+		slider_panel_.Size = new Vector2(220, 100);
+		slider_panel_.Visible = false;
+		slider_panel_.Modulate = new Color(1, 1, 1, 0.85f);
+
+		// Toon Levels
+		toon_label_ = new Label();
+		toon_label_.Position = new Vector2(10, 8);
+		toon_label_.Text = "Toon Levels: 0";
+		toon_label_.AddThemeFontSizeOverride("font_size", 14);
+		slider_panel_.AddChild(toon_label_);
+
+		toon_slider_ = new HSlider();
+		toon_slider_.Position = new Vector2(10, 32);
+		toon_slider_.Size = new Vector2(200, 20);
+		toon_slider_.MinValue = 0;
+		toon_slider_.MaxValue = 10;
+		toon_slider_.Step = 1;
+		toon_slider_.Value = toon_levels;
+		toon_slider_.ValueChanged += (double val) => { toon_levels = (float)val; };
+		slider_panel_.AddChild(toon_slider_);
+
+		// Spec Strength
+		spec_label_ = new Label();
+		spec_label_.Position = new Vector2(10, 55);
+		spec_label_.Text = "Spec: 0.50";
+		spec_label_.AddThemeFontSizeOverride("font_size", 14);
+		slider_panel_.AddChild(spec_label_);
+
+		spec_slider_ = new HSlider();
+		spec_slider_.Position = new Vector2(10, 78);
+		spec_slider_.Size = new Vector2(200, 20);
+		spec_slider_.MinValue = 0;
+		spec_slider_.MaxValue = 1;
+		spec_slider_.Step = 0.05;
+		spec_slider_.Value = spec_strength;
+		spec_slider_.ValueChanged += (double val) => { spec_strength = (float)val; };
+		slider_panel_.AddChild(spec_slider_);
+
+		AddChild(slider_panel_);
 	}
 
 	public void ResetParticles()
@@ -391,6 +449,13 @@ public partial class Ground : StaticBody2D
 
 		QueueRedraw();
 
+		// 更新滑块标签
+		if (slider_panel_ != null && slider_panel_.Visible)
+		{
+			toon_label_.Text = $"Toon Levels: {toon_levels:0}";
+			spec_label_.Text = $"Spec: {spec_strength:0.00}";
+		}
+
 		// 鼠标交互（强力抓取模式）— 暂停时也暂停
 		if (mouse_pressed_ && !paused_)
 		{
@@ -507,6 +572,19 @@ public partial class Ground : StaticBody2D
 			{
 				ToggleGpuMode();
 			}
+			if (key.Keycode == Key.H)
+			{
+				spec_strength = spec_strength > 0.01f ? 0f : 0.5f;
+			}
+			if (key.Keycode == Key.T)
+			{
+				toon_levels = toon_levels < 0.5f ? 4f : 0f;
+			}
+			if (key.Keycode == Key.V)
+			{
+				show_sliders_ = !show_sliders_;
+				if (slider_panel_ != null) slider_panel_.Visible = show_sliders_;
+			}
 		}
 	}
 
@@ -560,20 +638,36 @@ public partial class Ground : StaticBody2D
 		var font = ThemeDB.FallbackFont;
 		var vs = GetViewportRect().Size;
 
-		// FPS显示（右上角）
+		// 状态显示（右上角，右对齐）
+		const float right_margin = 12f;
+		float right_x = vs.X - right_margin;
+		float y = 22f;
+		float line_h = 20f;
+
 		var fps_text = $"FPS: {current_fps_:0}";
 		var fps_color = current_fps_ >= 60 ? Colors.Green : current_fps_ >= 30 ? Colors.Yellow : Colors.Red;
-		DrawString(font, new Vector2(vs.X - 120, 24), fps_text, fontSize: 18, modulate: fps_color);
+		DrawString(font, new Vector2(right_x - font.GetStringSize(fps_text).X, y), fps_text, fontSize: 16, modulate: fps_color);
+		y += line_h;
 
 		if (paused_)
 		{
-			DrawString(font, new Vector2(vs.X - 100, 46), "PAUSED", fontSize: 20, modulate: Colors.Yellow);
+			DrawString(font, new Vector2(right_x - font.GetStringSize("PAUSED").X, y), "PAUSED", fontSize: 16, modulate: Colors.Yellow);
+			y += line_h;
 		}
 
-		// GPU模式指示
 		if (gpu_mode_)
 		{
-			DrawString(font, new Vector2(vs.X - 130, 46), "GPU MODE", fontSize: 16, modulate: Colors.Cyan);
+			DrawString(font, new Vector2(right_x - font.GetStringSize("GPU MODE").X, y), "GPU MODE", fontSize: 14, modulate: Colors.Cyan);
+			y += line_h;
 		}
+
+		var spec_text = $"Spec: {spec_strength:0.00}";
+		DrawString(font, new Vector2(right_x - font.GetStringSize(spec_text).X, y), spec_text, fontSize: 14,
+			modulate: spec_strength > 0.01f ? Colors.White : Colors.Gray);
+		y += line_h;
+
+		var toon_text = $"Toon: {toon_levels:0}";
+		DrawString(font, new Vector2(right_x - font.GetStringSize(toon_text).X, y), toon_text, fontSize: 14,
+			modulate: toon_levels > 0.5f ? Colors.Orange : Colors.Gray);
 	}
 }

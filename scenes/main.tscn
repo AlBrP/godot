@@ -29,6 +29,8 @@ shader_parameter/water_bright = Vector3(0.6, 0.88, 1)
 shader_parameter/water_foam = Vector3(0.95, 0.97, 1)
 shader_parameter/water_spec = Vector3(1, 1, 1)
 shader_parameter/time = 0.0
+shader_parameter/spec_strength = 0.35
+shader_parameter/toon_levels = 0.0
 shader_parameter/debug_mode = 0
 
 [node name="main" type="Node2D"]
