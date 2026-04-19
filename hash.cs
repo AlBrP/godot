@@ -8,13 +8,13 @@ public partial class Ground : StaticBody2D
     private int[] hash_values;
     private Vector2I[] grid_cell_coord;
     private Vector2I[] grid_cell_neighbor_offsets;
-    private float grid_cell_size;
+    public float grid_cell_size;
     private float grid_cell_inverse;
-    private int[] hash_values_st, hash_values_ed;
-    private int big_num;
+    public int[] hash_values_st, hash_values_ed;
+    public int big_num;
 
     // 方案3：预分配数组，避免每帧分配
-    private int[] sorted_indices;
+    public int[] sorted_indices;
     private int[] sorted_hashes;
 
     // 哈希常数（参考 Fluid-Sim）
@@ -68,9 +68,12 @@ public partial class Ground : StaticBody2D
     // 哈希函数（参考 Fluid-Sim）
     private int HashCell(Vector2I cell)
     {
-        uint a = (uint)(cell.X * HASH_K1);
-        uint b = (uint)(cell.Y * HASH_K2);
-        return (int)((a + b) % ball_nums_);
+        // 关键：先转 uint 再乘，与参考项目一致
+        uint cx = (uint)cell.X;
+        uint cy = (uint)cell.Y;
+        uint a = cx * (uint)HASH_K1;
+        uint b = cy * (uint)HASH_K2;
+        return (int)((a + b) % (uint)ball_nums_);
     }
 
     private void GetHashValue(int index)

@@ -1,23 +1,62 @@
 [gd_scene load_steps=5 format=3 uid="uid://be8ticxudt62q"]
 
-[ext_resource type="Shader" path="res://scenes/main.gdshader" id="1_2obhn"]
+[ext_resource type="Shader" path="res://scenes/metaball.gdshader" id="1_metaball"]
 [ext_resource type="Script" path="res://scenes/Color_Rect.cs" id="2_gl22a"]
 [ext_resource type="PackedScene" uid="uid://bplaqc5lnarr5" path="res://scenes/ground.tscn" id="2_j27gb"]
 
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_a5633"]
-shader = ExtResource("1_2obhn")
-shader_parameter/ball_position_uv = null
-shader_parameter/hint_color = Vector4(0, 0, 1, 1)
-shader_parameter/render_enabled = true
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_test"]
+shader = ExtResource("1_metaball")
+shader_parameter/particle_count = 5000
+shader_parameter/texture_size = Vector2(72, 70)
+shader_parameter/render_enabled = false
+shader_parameter/viewport_size = Vector2(1152, 648)
+shader_parameter/bbox_min = Vector2(0, 0)
+shader_parameter/bbox_max = Vector2(1152, 648)
+shader_parameter/grid_cell_size = 17.0
+shader_parameter/ground_offset = Vector2(0, 0)
+shader_parameter/field_strength = 1.8
+shader_parameter/sigma = 9.0
+shader_parameter/body_threshold = 6.0
+shader_parameter/edge_threshold = 5.0
+shader_parameter/stretch_scale = 0.003
+shader_parameter/density_scale = 0.3
+shader_parameter/edge_sharpness = 0.72
+shader_parameter/field_scale = 0.008
+shader_parameter/water_deep = Vector3(0.04, 0.18, 0.42)
+shader_parameter/water_mid = Vector3(0.08, 0.42, 0.68)
+shader_parameter/water_light = Vector3(0.18, 0.62, 0.85)
+shader_parameter/water_bright = Vector3(0.6, 0.88, 1)
+shader_parameter/water_foam = Vector3(0.95, 0.97, 1)
+shader_parameter/water_spec = Vector3(1, 1, 1)
+shader_parameter/time = 0.0
+shader_parameter/debug_mode = 0
 
 [node name="main" type="Node2D"]
 
-[node name="ColorRect" type="ColorRect" parent="."]
-material = SubResource("ShaderMaterial_a5633")
-offset_left = 8.0
-offset_top = -9.0
-offset_right = 1160.0
-offset_bottom = 1143.0
+[node name="CanvasLayer" type="CanvasLayer" parent="."]
+layer = 20
+
+[node name="SubVPContainer" type="SubViewportContainer" parent="CanvasLayer"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+stretch = true
+
+[node name="SubVP" type="SubViewport" parent="CanvasLayer/SubVPContainer"]
+transparent_bg = true
+handle_input_locally = false
+size = Vector2i(1152, 648)
+render_target_update_mode = 4
+
+[node name="ColorRect" type="ColorRect" parent="CanvasLayer/SubVPContainer/SubVP"]
+material = SubResource("ShaderMaterial_test")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
 script = ExtResource("2_gl22a")
 
 [node name="Ground" parent="." instance=ExtResource("2_j27gb")]
