@@ -18,9 +18,14 @@ public partial class Color_Rect : ColorRect
 	// 速度归一化参数
 	private const float MAX_VEL = 2000f;
 
-	// 渲染开关
-	private bool metaball_enabled_ = false;
+	// 渲染开关（默认开启）
+	private bool metaball_enabled_ = true;
 	public bool MetaballEnabled => metaball_enabled_;
+
+	// GPU模式：使用SphGpu输出的Texture2Drd替代CPU ImageTexture
+	private bool gpu_mode_ = false;
+	private Texture2Drd gpu_position_tex_;
+	private Texture2Drd gpu_hashlookup_tex_;
 
 	// Debug 模式：0=off, 1=heatmap+grid, 2=brute force
 	private int debug_mode_ = 0;
@@ -61,8 +66,6 @@ public partial class Color_Rect : ColorRect
 
 		_rawBytes = new byte[TEXTURE_WIDTH * TEXTURE_HEIGHT * 8]; // RGBA16F: 8 bytes per pixel
 		_hashBytes = new byte[TEXTURE_WIDTH * TEXTURE_HEIGHT * 8]; // RG32F: 8 bytes per pixel
-
-		GD.Print($"ColorRect Ready: size={Size.X}x{Size.Y}");
 	}
 
 	private bool _needsBuild = false;
@@ -72,16 +75,39 @@ public partial class Color_Rect : ColorRect
 		_needsBuild = true;
 	}
 
+	public void SetGpuTextures(Texture2Drd posTex, Texture2Drd hlTex)
+	{
+		gpu_position_tex_ = posTex;
+		gpu_hashlookup_tex_ = hlTex;
+	}
+
+	public void SetGpuMode(bool enabled)
+	{
+		gpu_mode_ = enabled;
+		if (Material is ShaderMaterial shaderMaterial)
+		{
+			if (gpu_mode_ && gpu_position_tex_ != null)
+			{
+				shaderMaterial.SetShaderParameter("raw_position_texture", gpu_position_tex_);
+				shaderMaterial.SetShaderParameter("hash_lookup_texture", gpu_hashlookup_tex_);
+			}
+			else
+			{
+				shaderMaterial.SetShaderParameter("raw_position_texture", raw_position_texture_);
+				shaderMaterial.SetShaderParameter("hash_lookup_texture", hash_lookup_texture_);
+			}
+		}
+	}
+
 	public override void _Process(double delta)
 	{
 		if (Material is not ShaderMaterial shaderMaterial) return;
 
-		if (metaball_enabled_ && _needsBuild)
+		// GPU模式下纹理由compute shader直接写入，不需要CPU重建
+		if (metaball_enabled_ && _needsBuild && !gpu_mode_)
 		{
-			long t0 = (long)Time.GetTicksUsec();
 			BuildRawPositionTexture();
 			_needsBuild = false;
-			ground_.build_tex_ms_ = ((long)Time.GetTicksUsec() - t0) / 1000f;
 		}
 
 		shaderMaterial.SetShaderParameter("render_enabled", metaball_enabled_);
@@ -100,8 +126,17 @@ public partial class Color_Rect : ColorRect
 		// viewport_size: shader用它把屏幕UV转成世界坐标
 		var vpSize = ground_.GetViewportRect().Size;
 		shaderMaterial.SetShaderParameter("viewport_size", vpSize);
-		shaderMaterial.SetShaderParameter("bbox_min", bbox_min_);
-		shaderMaterial.SetShaderParameter("bbox_max", bbox_max_);
+		// GPU模式下bbox由simulation bounds覆盖（CPU模式由BuildRawPositionTexture更新）
+		if (gpu_mode_)
+		{
+			shaderMaterial.SetShaderParameter("bbox_min", ground_.Position);
+			shaderMaterial.SetShaderParameter("bbox_max", new Vector2(vpSize.X, vpSize.Y - 100f));
+		}
+		else
+		{
+			shaderMaterial.SetShaderParameter("bbox_min", bbox_min_);
+			shaderMaterial.SetShaderParameter("bbox_max", bbox_max_);
+		}
 
 		// 空间哈希参数
 		shaderMaterial.SetShaderParameter("grid_cell_size", (double)ground_.grid_cell_size);
@@ -110,23 +145,7 @@ public partial class Color_Rect : ColorRect
 
 	public override void _Input(InputEvent @event)
 	{
-		if (@event is InputEventKey key && key.Pressed && !key.Echo)
-		{
-			if (key.Keycode == Key.R)
-			{
-				metaball_enabled_ = !metaball_enabled_;
-				ground_.SetParticleSpritesVisible(!metaball_enabled_);
-				if (metaball_enabled_)
-					BuildRawPositionTexture();
-				GD.Print($"Render: {(metaball_enabled_ ? "Metaball" : "Particles")}");
-			}
-			else if (key.Keycode == Key.D && metaball_enabled_)
-			{
-				debug_mode_ = (debug_mode_ + 1) % 3;
-				string[] names = { "OFF", "Heatmap+Grid", "BruteForce" };
-				GD.Print($"Debug: {names[debug_mode_]}");
-			}
-		}
+		// 无调试按键，保留空方法以便将来扩展
 	}
 
 	// ===== 将 float 编码为 RGBA16F (half-float per channel) =====

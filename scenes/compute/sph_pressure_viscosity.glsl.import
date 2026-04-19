@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://b3j2smwhmb4wd"
+path="res://.godot/imported/sph_pressure_viscosity.glsl-27c03d3d44f325b79702bfe7d98d1211.res"
+
+[deps]
+
+source_file="res://scenes/compute/sph_pressure_viscosity.glsl"
+dest_files=["res://.godot/imported/sph_pressure_viscosity.glsl-27c03d3d44f325b79702bfe7d98d1211.res"]
+
+[params]
+

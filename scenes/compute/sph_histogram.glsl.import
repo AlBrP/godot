@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://bpcximiknddh7"
+path="res://.godot/imported/sph_histogram.glsl-cac7928281a9b3fe7191ba681ca9e72b.res"
+
+[deps]
+
+source_file="res://scenes/compute/sph_histogram.glsl"
+dest_files=["res://.godot/imported/sph_histogram.glsl-cac7928281a9b3fe7191ba681ca9e72b.res"]
+
+[params]
+

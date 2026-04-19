@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://b6bn8rqa3qawe"
+path="res://.godot/imported/sph_forces_hash.glsl-6d2ae6dfcada7a5d4e50f58a2052f39a.res"
+
+[deps]
+
+source_file="res://scenes/compute/sph_forces_hash.glsl"
+dest_files=["res://.godot/imported/sph_forces_hash.glsl-6d2ae6dfcada7a5d4e50f58a2052f39a.res"]
+
+[params]
+

@@ -28,23 +28,6 @@ public partial class Ground : StaticBody2D
 	// 卡通水参数（已简化）
 	[Export] public float edge_sharpness { get; set; } = 0.78f;  // 越高边缘越窄锐利
 
-	// UI滑块（渲染参数）
-	private HSlider fieldStrengthSlider;
-	private HSlider sigmaSlider;
-	private HSlider bodyThresholdSlider;
-	private HSlider edgeThresholdSlider;
-	private HSlider stretchScaleSlider;
-	private HSlider densityScaleSlider;
-	private HSlider fieldScaleSlider;
-
-	private Label fieldStrengthLabel;
-	private Label sigmaLabel;
-	private Label bodyThresholdLabel;
-	private Label edgeThresholdLabel;
-	private Label stretchScaleLabel;
-	private Label densityScaleLabel;
-	private Label fieldScaleLabel;
-
 	// 粒子数量
 	public const int ball_nums_ = 5000;
 
@@ -84,8 +67,6 @@ public partial class Ground : StaticBody2D
 	private float fps_time_accum_ = 0f;
 	private int fps_frame_count_ = 0;
 	private float current_fps_ = 0f;
-	public float physics_ms_ = 0f;
-	public float build_tex_ms_ = 0f;
 
 	// metaball 渲染引用
 	private Color_Rect colorRect_;
@@ -96,6 +77,11 @@ public partial class Ground : StaticBody2D
 	// 暂停
 	private bool paused_ = false;
 	public bool Paused => paused_;
+
+	// GPU Compute模式
+	private bool gpu_mode_ = false;
+	public bool GpuMode => gpu_mode_;
+	private SphGpu sph_gpu_;
 
 
 	public override void _Ready()
@@ -143,104 +129,13 @@ public partial class Ground : StaticBody2D
 		// 获取 metaball ColorRect 引用
 		colorRect_ = GetNode<Color_Rect>("../CanvasLayer/SubVPContainer/SubVP/ColorRect");
 
-		// 创建UI（合并面板）
-		CreateControlPanel();
-	}
+		// 初始化GPU compute
+		sph_gpu_ = new SphGpu();
+		sph_gpu_.Init();
+		colorRect_.SetGpuTextures(sph_gpu_.PositionTex, sph_gpu_.HashLookupTex);
 
-	private void CreateControlPanel()
-	{
-		var canvas = new CanvasLayer();
-		canvas.Layer = 10;
-		AddChild(canvas);
-
-		// 半透明面板容器
-		var panel = new PanelContainer();
-		panel.Position = new Vector2(8, 8);
-
-		var style = new StyleBoxFlat();
-		style.BgColor = new Godot.Color(0.08f, 0.08f, 0.12f, 0.85f);
-		style.CornerRadiusTopLeft = 6;
-		style.CornerRadiusTopRight = 6;
-		style.CornerRadiusBottomLeft = 6;
-		style.CornerRadiusBottomRight = 6;
-		style.ContentMarginLeft = 10;
-		style.ContentMarginRight = 10;
-		style.ContentMarginTop = 8;
-		style.ContentMarginBottom = 8;
-		panel.AddThemeStyleboxOverride("panel", style);
-		canvas.AddChild(panel);
-
-		var vbox = new VBoxContainer();
-		vbox.AddThemeConstantOverride("separation", 4);
-		panel.AddChild(vbox);
-
-		// 标题行：Reset按钮 + 渲染模式提示
-		var titleRow = new HBoxContainer();
-		vbox.AddChild(titleRow);
-
-		var resetBtn = new Button();
-		resetBtn.Text = "Reset [Space]";
-		resetBtn.CustomMinimumSize = new Vector2(110, 28);
-		resetBtn.Pressed += ResetParticles;
-		titleRow.AddChild(resetBtn);
-
-		var hintLabel = new Label();
-		hintLabel.Text = "  R: toggle render   P: pause";
-		hintLabel.Modulate = new Godot.Color(0.7f, 0.7f, 0.75f, 1f);
-		hintLabel.VerticalAlignment = VerticalAlignment.Center;
-		titleRow.AddChild(hintLabel);
-
-		// 分隔线
-		var hSep = new HSeparator();
-		vbox.AddChild(hSep);
-
-		// 滑块区
-		var sliderVBox = new VBoxContainer();
-		sliderVBox.AddThemeConstantOverride("separation", 2);
-		vbox.AddChild(sliderVBox);
-
-		AddSlider(sliderVBox, "Field", ref fieldStrengthLabel, ref fieldStrengthSlider,
-			field_strength, 0.1f, 10.0f, 0.1f, (v) => { field_strength = v; fieldStrengthLabel.Text = $"Field: {v:F1}"; });
-
-		AddSlider(sliderVBox, "Sigma", ref sigmaLabel, ref sigmaSlider,
-			sigma, 4f, 30f, 1f, (v) => { sigma = v; sigmaLabel.Text = $"Sigma: {v:F0}"; });
-
-		AddSlider(sliderVBox, "BodyThresh", ref bodyThresholdLabel, ref bodyThresholdSlider,
-			body_threshold, 1.0f, 30.0f, 0.5f, (v) => { body_threshold = v; bodyThresholdLabel.Text = $"BodyThresh: {v:F1}"; });
-
-		AddSlider(sliderVBox, "EdgeThresh", ref edgeThresholdLabel, ref edgeThresholdSlider,
-			edge_threshold, 1.0f, 10.0f, 0.1f, (v) => { edge_threshold = v; edgeThresholdLabel.Text = $"EdgeThresh: {v:F1}"; });
-
-		AddSlider(sliderVBox, "Stretch", ref stretchScaleLabel, ref stretchScaleSlider,
-			stretch_scale, 0.0f, 0.01f, 0.001f, (v) => { stretch_scale = v; stretchScaleLabel.Text = $"Stretch: {v:F3}"; });
-
-		AddSlider(sliderVBox, "Density", ref densityScaleLabel, ref densityScaleSlider,
-			density_scale, 0.0f, 2.0f, 0.1f, (v) => { density_scale = v; densityScaleLabel.Text = $"Density: {v:F1}"; });
-
-		AddSlider(sliderVBox, "FieldScale", ref fieldScaleLabel, ref fieldScaleSlider,
-			field_scale, 0.001f, 0.05f, 0.001f, (v) => { field_scale = v; fieldScaleLabel.Text = $"FieldScale: {v:F3}"; });
-	}
-
-	private void AddSlider(VBoxContainer parent, string name, ref Label label, ref HSlider slider, float value, float min, float max, float step, Action<float> onChanged)
-	{
-		var row = new HBoxContainer();
-
-		label = new Label();
-		label.Text = $"{name}: {value}";
-		label.CustomMinimumSize = new Vector2(100, 20);
-		row.AddChild(label);
-
-		slider = new HSlider();
-		slider.MinValue = min;
-		slider.MaxValue = max;
-		slider.Step = step;
-		slider.Value = value;
-		slider.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
-		slider.CustomMinimumSize = new Vector2(120, 18);
-		slider.ValueChanged += (double v) => onChanged((float)v);
-		row.AddChild(slider);
-
-		parent.AddChild(row);
+		// 默认开启metaball渲染，隐藏粒子精灵
+		SetParticleSpritesVisible(false);
 	}
 
 	public void ResetParticles()
@@ -262,7 +157,6 @@ public partial class Ground : StaticBody2D
 			near_density_[i] = 0f;
 			predicted_pos_[i] = pos_[i];
 		}
-		GD.Print("Particles reset");
 	}
 
 	// 更新核函数缩放因子（参考Fluid-Sim）
@@ -482,7 +376,6 @@ public partial class Ground : StaticBody2D
 		if (fps_time_accum_ >= 0.5f)
 		{
 			current_fps_ = fps_frame_count_ / fps_time_accum_;
-			GD.Print($"FPS:{current_fps_:0} Physics:{physics_ms_:F1}ms BuildTex:{build_tex_ms_:F1}ms");
 			fps_time_accum_ = 0f;
 			fps_frame_count_ = 0;
 		}
@@ -539,45 +432,62 @@ public partial class Ground : StaticBody2D
 		float subDt = frameDt / iterations_per_frame;
 		current_sub_dt_ = subDt;
 
-		long t0 = (long)Time.GetTicksUsec();
-
-		for (int iter = 0; iter < iterations_per_frame; iter++)
+		if (gpu_mode_)
 		{
-			// 1. 外力（重力+预测位置）
-			ApplyExternalForces(subDt);
-
-			// 2. 空间哈希
-			Hashing();
-
-			// 3. 邻居搜索
-			Parallel.For(0, ball_nums_, i =>
+			DispatchGpu(frameDt, subDt);
+		}
+		else
+		{
+			for (int iter = 0; iter < iterations_per_frame; iter++)
 			{
-				neighbor_count_[i] = 0;
-				SearchNeighborsToCache(i, ref neighbor_cache_[i], ref neighbor_count_[i]);
-			});
+				// 1. 外力（重力+预测位置）
+				ApplyExternalForces(subDt);
 
-			// 4. 密度计算
-			Parallel.For(0, ball_nums_, i => CalculateDensity(i));
+				// 2. 空间哈希
+				Hashing();
 
-			// 5. 压力力计算
-			Parallel.For(0, ball_nums_, i => CalculatePressureForce(i));
+				// 3. 邻居搜索
+				Parallel.For(0, ball_nums_, i =>
+				{
+					neighbor_count_[i] = 0;
+					SearchNeighborsToCache(i, ref neighbor_cache_[i], ref neighbor_count_[i]);
+				});
 
-			// 6. 粘度力计算
-			if (viscosity_strength > 0)
-			{
-				Parallel.For(0, ball_nums_, i => CalculateViscosity(i));
+				// 4. 密度计算
+				Parallel.For(0, ball_nums_, i => CalculateDensity(i));
+
+				// 5. 压力力计算
+				Parallel.For(0, ball_nums_, i => CalculatePressureForce(i));
+
+				// 6. 粘度力计算
+				if (viscosity_strength > 0)
+				{
+					Parallel.For(0, ball_nums_, i => CalculateViscosity(i));
+				}
+
+				// 7. 更新位置
+				Integrate(subDt);
 			}
 
-			// 7. 更新位置
-			Integrate(subDt);
+			// 通知 ColorRect 重建数据
+			if (colorRect_ != null)
+				colorRect_.RequestBuild();
 		}
+	}
 
-		long t1 = (long)Time.GetTicksUsec();
-		physics_ms_ = (t1 - t0) / 1000f;
-
-		// 通知 ColorRect 重建 tile 数据
-		if (colorRect_ != null)
-			colorRect_.RequestBuild();
+	private void DispatchGpu(float frameDt, float subDt)
+	{
+		sph_gpu_.UpdateParams(
+			frameDt, subDt, gravity, velocity_damping,
+			smoothing_radius, pressure_multiplier, near_pressure_multiplier,
+			viscosity_strength, collision_damping,
+			1f / 60f, 2000f,    // predictionFactor, maxVel
+			bounds_min_, bounds_max_,
+			mouse_pressed_, mouse_position_,
+			120f, 30f, 1500f,   // mouseRadiusGrab, mouseRadiusStick, grabSpeed
+			Position
+		);
+		sph_gpu_.DispatchFrame(frameDt, iterations_per_frame);
 	}
 
 	public override void _Input(InputEvent @event)
@@ -591,13 +501,48 @@ public partial class Ground : StaticBody2D
 		{
 			if (key.Keycode == Key.Space)
 			{
-				ResetParticles();
-			}
-			else if (key.Keycode == Key.P)
-			{
 				paused_ = !paused_;
-				GD.Print(paused_ ? "Paused" : "Resumed");
 			}
+			if (key.Keycode == Key.G)
+			{
+				ToggleGpuMode();
+			}
+		}
+	}
+
+	private void ToggleGpuMode()
+	{
+		if (gpu_mode_)
+		{
+			// GPU → CPU: 读回粒子位置和速度
+			byte[] data = sph_gpu_.ReadBackParticleBuffer();
+			for (int i = 0; i < ball_nums_; i++)
+			{
+				int off = i * 8;
+				pos_[i] = new Vector2(
+					BitConverter.ToSingle(data, off),
+					BitConverter.ToSingle(data, off + 4)
+				);
+				int voff = ball_nums_ * 8 + i * 8;
+				vel_[i] = new Vector2(
+					BitConverter.ToSingle(data, voff),
+					BitConverter.ToSingle(data, voff + 4)
+				);
+			}
+			gpu_mode_ = false;
+			colorRect_.SetGpuMode(false);
+		}
+		else
+		{
+			// CPU → GPU: 上传粒子位置和速度
+			sph_gpu_.ResetParticles(pos_, vel_, Position);
+			gpu_mode_ = true;
+			colorRect_.SetGpuMode(true);
+
+			// Warm up: 立即dispatch一帧，填充输出纹理，避免首帧空白
+			float warmDt = 1f / 60f;
+			float warmSubDt = warmDt / iterations_per_frame;
+			DispatchGpu(warmDt, warmSubDt);
 		}
 	}
 
@@ -613,28 +558,22 @@ public partial class Ground : StaticBody2D
 	public override void _Draw()
 	{
 		var font = ThemeDB.FallbackFont;
-
-		// 边界线（动态适配窗口）
 		var vs = GetViewportRect().Size;
-		var line_color = new Godot.Color(0.2f, 0.5f, 1.0f, 0.8f);
-		float line_w = 2f;
-		DrawLine(new Vector2(0, 0), new Vector2(vs.X, 0), line_color, line_w);
-		DrawLine(new Vector2(vs.X, 0), new Vector2(vs.X, vs.Y), line_color, line_w);
-		DrawLine(new Vector2(0, vs.Y), new Vector2(vs.X, vs.Y), line_color, line_w);
-		DrawLine(new Vector2(0, 0), new Vector2(0, vs.Y), line_color, line_w);
 
 		// FPS显示（右上角）
 		var fps_text = $"FPS: {current_fps_:0}";
 		var fps_color = current_fps_ >= 60 ? Colors.Green : current_fps_ >= 30 ? Colors.Yellow : Colors.Red;
 		DrawString(font, new Vector2(vs.X - 120, 24), fps_text, fontSize: 18, modulate: fps_color);
 
-		// 暂停状态（右上角FPS下方）
 		if (paused_)
 		{
-			DrawString(font, new Vector2(vs.X - 80, 46), "PAUSED", fontSize: 16, modulate: Colors.Yellow);
+			DrawString(font, new Vector2(vs.X - 100, 46), "PAUSED", fontSize: 20, modulate: Colors.Yellow);
 		}
 
-		// 鼠标交互圈
-		DrawArc(mouse_position_, 70f, 0, Mathf.Tau, 32, new Godot.Color(1, 0, 0, 0.5f), 2f, false);
+		// GPU模式指示
+		if (gpu_mode_)
+		{
+			DrawString(font, new Vector2(vs.X - 130, 46), "GPU MODE", fontSize: 16, modulate: Colors.Cyan);
+		}
 	}
 }
