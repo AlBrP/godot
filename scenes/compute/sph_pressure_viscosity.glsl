@@ -109,13 +109,17 @@ void main() {
     init_kernel_scales();
 
     int idxi = int(idx);
+    int pi = pred_offset(idxi);
+    vec2 my_pos = vec2(particle_data[pi], particle_data[pi + 1]);
+
+    // Inactive particle: skip force computation
+    if (my_pos.y < -500.0) return;
+
     float my_density = particle_data[density_offset(idxi)];
     float my_near_density = particle_data[near_density_offset(idxi)];
     float my_pressure = pressure_from_density(my_density);
     float my_near_pressure = near_pressure_from_density(my_near_density);
 
-    int pi = pred_offset(idxi);
-    vec2 my_pos = vec2(particle_data[pi], particle_data[pi + 1]);
     int vi = vel_offset(idxi);
     vec2 my_vel = vec2(particle_data[vi], particle_data[vi + 1]);
 

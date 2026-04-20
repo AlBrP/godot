@@ -72,6 +72,9 @@ public partial class Ground : StaticBody2D
 	// 鼠标交互
 	public bool mouse_pressed_ = false;
 	private Vector2 mouse_position_ = Vector2.Zero;
+	private int spawn_index_ = 0;       // 下一个待喷出粒子的索引
+	private bool spray_mode_ = true;    // 喷水模式：按住鼠标喷出粒子
+	private int last_synced_spawn_ = 0;     // 上次同步到GPU的spawn位置（累计上传用）
 
 	// FPS 统计
 	private float fps_time_accum_ = 0f;
@@ -147,6 +150,19 @@ public partial class Ground : StaticBody2D
 		// 默认开启metaball渲染，隐藏粒子精灵
 		SetParticleSpritesVisible(false);
 
+		// 默认开启GPU模式
+		gpu_mode_ = true;
+		colorRect_.SetGpuMode(true);
+		sph_gpu_.ResetParticles(pos_, vel_, Position);
+		{
+			float warmDt = 1f / 60f;
+			float warmSubDt = warmDt / iterations_per_frame;
+			DispatchGpu(warmDt, warmSubDt);
+		}
+
+		// 默认开启Toon
+		toon_levels = 4f;
+
 		// 创建运行时滑块面板
 		CreateSliderPanel();
 	}
@@ -207,14 +223,25 @@ public partial class Ground : StaticBody2D
 
 		for (int i = 0; i < ball_nums_; i++)
 		{
-			float x = (i % rows - rows / 2f + 0.5f) * spacing + offset_x;
-			float y = (i / rows - cols / 2f + 0.5f) * spacing + offset_y;
-			pos_[i] = new Vector2(x, y);
-			vel_[i] = Vector2.Zero;
+			if (spray_mode_)
+			{
+				// 喷水模式：全部粒子放到屏幕外，等待鼠标喷出
+				pos_[i] = new Vector2(-1000f, -1000f);
+				vel_[i] = Vector2.Zero;
+			}
+			else
+			{
+				float x = (i % rows - rows / 2f + 0.5f) * spacing + offset_x;
+				float y = (i / rows - cols / 2f + 0.5f) * spacing + offset_y;
+				pos_[i] = new Vector2(x, y);
+				vel_[i] = Vector2.Zero;
+			}
 			density_[i] = 0f;
 			near_density_[i] = 0f;
 			predicted_pos_[i] = pos_[i];
 		}
+		spawn_index_ = 0;
+		last_synced_spawn_ = 0;
 	}
 
 	// 更新核函数缩放因子（参考Fluid-Sim）
@@ -283,6 +310,14 @@ public partial class Ground : StaticBody2D
 	// 密度计算（参考Fluid-Sim）
 	private void CalculateDensity(int index)
 	{
+		// 非活跃粒子跳过
+		if (predicted_pos_[index].Y < -500f)
+		{
+			density_[index] = 0f;
+			near_density_[index] = 0f;
+			return;
+		}
+
 		Vector2 pos = predicted_pos_[index];
 		float density = 0;
 		float nearDensity = 0;
@@ -309,6 +344,9 @@ public partial class Ground : StaticBody2D
 	// 压力力计算（参考Fluid-Sim）
 	private void CalculatePressureForce(int index)
 	{
+		// 非活跃粒子跳过
+		if (predicted_pos_[index].Y < -500f) return;
+
 		float density = density_[index];
 		float nearDensity = near_density_[index];
 		float pressure = PressureFromDensity(density);
@@ -349,6 +387,9 @@ public partial class Ground : StaticBody2D
 	// 粘度力计算（参考Fluid-Sim）
 	private void CalculateViscosity(int index)
 	{
+		// 非活跃粒子跳过
+		if (predicted_pos_[index].Y < -500f) return;
+
 		Vector2 pos = predicted_pos_[index];
 		Vector2 velocity = vel_[index];
 		Vector2 viscosityForce = Vector2.Zero;
@@ -377,6 +418,9 @@ public partial class Ground : StaticBody2D
 	{
 		for (int i = 0; i < ball_nums_; i++)
 		{
+			// 跳过非活跃粒子
+			if (pos_[i].Y < -500f) continue;
+
 			// 重力
 			vel_[i].Y += gravity * dt;
 
@@ -394,6 +438,9 @@ public partial class Ground : StaticBody2D
 	{
 		for (int i = 0; i < ball_nums_; i++)
 		{
+			// 跳过非活跃粒子（不clamp到边界）
+			if (pos_[i].Y < -500f) continue;
+
 			// 更新位置
 			pos_[i] += vel_[i] * dt;
 
@@ -456,33 +503,56 @@ public partial class Ground : StaticBody2D
 			spec_label_.Text = $"Spec: {spec_strength:0.00}";
 		}
 
-		// 鼠标交互（强力抓取模式）— 暂停时也暂停
-		if (mouse_pressed_ && !paused_)
+		// 鼠标交互
+		if (!paused_)
 		{
-			float r_grab = 120f;        // 抓取范围
-			float r_stick = 30f;         // 粘住核心区
-			float grab_speed = 1500f;     // 拉向鼠标的速度上限
-
-			for (int i = 0; i < ball_nums_; i++)
+			if (spray_mode_ && mouse_pressed_)
 			{
-				Vector2 diff = mouse_position_ - pos_[i];
-				float len = diff.Length();
-				if (len < r_grab && len > 0.001f)
-				{
-					Vector2 dir = diff / len;
+				// 喷水模式：稀疏+高速+大间距 → 形成连贯水柱，不被SPH压力炸散
+				int spawn_count = 8;
 
-					if (len < r_stick)
+				for (int s = 0; s < spawn_count && spawn_index_ < ball_nums_; s++, spawn_index_++)
+				{
+					// 极窄 ±1° 扇形（水柱集中）
+					float angle = (float)GD.RandRange(-Mathf.Pi * 0.252, -Mathf.Pi * 0.238);
+					// 更高速
+					float speed = (float)GD.RandRange(2000f, 2100f);
+					Vector2 vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
+					vel_[spawn_index_] = vel;
+
+					// 沿速度方向错开，间距更大让粒子不重叠
+					float along_dist = (float)GD.RandRange(50f, 110f);
+					Vector2 dir_norm = vel.Normalized();
+					pos_[spawn_index_] = mouse_position_ + dir_norm * along_dist;
+					predicted_pos_[spawn_index_] = pos_[spawn_index_];
+				}
+			}
+			else if (!spray_mode_ && mouse_pressed_)
+			{
+				// 抓取模式
+				float r_grab = 120f;
+				float r_stick = 30f;
+				float grab_speed = 1500f;
+
+				for (int i = 0; i < ball_nums_; i++)
+				{
+					Vector2 diff = mouse_position_ - pos_[i];
+					float len = diff.Length();
+					if (len < r_grab && len > 0.001f)
 					{
-						// 核心区：直接设置速度跟鼠标，强阻尼稳住
-						vel_[i] = dir * grab_speed * (len / r_stick);
-						vel_[i] *= 0.3f;  // 强阻尼
-					}
-					else
-					{
-						// 外围区：加速拉过来
-						float t = 1f - (len - r_stick) / (r_grab - r_stick);
-						vel_[i] += dir * grab_speed * t * 0.3f;
-						vel_[i] *= 0.95f;  // 中等阻尼
+						Vector2 dir = diff / len;
+
+						if (len < r_stick)
+						{
+							vel_[i] = dir * grab_speed * (len / r_stick);
+							vel_[i] *= 0.3f;
+						}
+						else
+						{
+							float t = 1f - (len - r_stick) / (r_grab - r_stick);
+							vel_[i] += dir * grab_speed * t * 0.3f;
+							vel_[i] *= 0.95f;
+						}
 					}
 				}
 			}
@@ -499,6 +569,15 @@ public partial class Ground : StaticBody2D
 
 		if (gpu_mode_)
 		{
+			// 喷水模式下累计同步所有未上传的spawn粒子到GPU
+			// （_Process可能每帧跑多次，必须累计，不能只传最后一批）
+			if (spray_mode_ && spawn_index_ > last_synced_spawn_)
+			{
+				int count = spawn_index_ - last_synced_spawn_;
+				if (count > 0)
+					sph_gpu_.UpdateParticlesBatch(last_synced_spawn_, pos_, vel_, count);
+				last_synced_spawn_ = spawn_index_;
+			}
 			DispatchGpu(frameDt, subDt);
 		}
 		else
@@ -550,7 +629,8 @@ public partial class Ground : StaticBody2D
 			bounds_min_, bounds_max_,
 			mouse_pressed_, mouse_position_,
 			120f, 30f, 1500f,   // mouseRadiusGrab, mouseRadiusStick, grabSpeed
-			Position
+			Position,
+			spray_mode_         // sprayMode
 		);
 		sph_gpu_.DispatchFrame(frameDt, iterations_per_frame);
 	}
@@ -584,6 +664,15 @@ public partial class Ground : StaticBody2D
 			{
 				show_sliders_ = !show_sliders_;
 				if (slider_panel_ != null) slider_panel_.Visible = show_sliders_;
+			}
+			if (key.Keycode == Key.B)
+			{
+				spray_mode_ = !spray_mode_;
+				ResetParticles();
+				if (gpu_mode_)
+				{
+					sph_gpu_.ResetParticles(pos_, vel_, Position);
+				}
 			}
 		}
 	}
@@ -669,5 +758,10 @@ public partial class Ground : StaticBody2D
 		var toon_text = $"Toon: {toon_levels:0}";
 		DrawString(font, new Vector2(right_x - font.GetStringSize(toon_text).X, y), toon_text, fontSize: 14,
 			modulate: toon_levels > 0.5f ? Colors.Orange : Colors.Gray);
+		y += line_h;
+
+		var mode_text = spray_mode_ ? "SPRAY" : "GRAB";
+		DrawString(font, new Vector2(right_x - font.GetStringSize(mode_text).X, y), mode_text, fontSize: 14,
+			modulate: spray_mode_ ? Colors.Cyan : Colors.Green);
 	}
 }

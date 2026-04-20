@@ -288,7 +288,7 @@ public class SphGpu
 		Vector2 boundsMin, Vector2 boundsMax,
 		bool mousePressed, Vector2 mousePos,
 		float mouseRadiusGrab, float mouseRadiusStick, float grabSpeed,
-		Vector2 groundOffset)
+		Vector2 groundOffset, bool sprayMode)
 	{
 		byte[] data = new byte[PARAMS_BUF_SIZE];
 		int offset = 0;
@@ -314,7 +314,8 @@ public class SphGpu
 		WriteInt(data, ref offset, N);                      // 88
 		WriteInt(data, ref offset, mousePressed ? 1 : 0);   // 92
 		WriteVec2(data, ref offset, groundOffset);           // 96
-		// Total: 104 bytes
+		WriteInt(data, ref offset, sprayMode ? 1 : 0);      // 104
+		// Total: 108 bytes, padded to 112
 
 		RD.BufferUpdate(params_ubuf, 0, PARAMS_BUF_SIZE, data);
 	}
@@ -445,6 +446,49 @@ public class SphGpu
 	public byte[] ReadBackParticleBuffer()
 	{
 		return RD.BufferGetData(particle_buf, 0, PARTICLE_BUF_SIZE);
+	}
+
+	// 上传单个粒子的pos和vel到GPU buffer
+	public void UpdateParticle(int index, Vector2 pos, Vector2 vel)
+	{
+		uint off = (uint)(index * 8);
+		uint voff = (uint)(N * 8 + index * 8);
+		byte[] posData = new byte[8];
+		byte[] xb = BitConverter.GetBytes(pos.X);
+		byte[] yb = BitConverter.GetBytes(pos.Y);
+		posData[0] = xb[0]; posData[1] = xb[1]; posData[2] = xb[2]; posData[3] = xb[3];
+		posData[4] = yb[0]; posData[5] = yb[1]; posData[6] = yb[2]; posData[7] = yb[3];
+		RD.BufferUpdate(particle_buf, off, 8, posData);
+
+		byte[] velData = new byte[8];
+		byte[] vxb = BitConverter.GetBytes(vel.X);
+		byte[] vyb = BitConverter.GetBytes(vel.Y);
+		velData[0] = vxb[0]; velData[1] = vxb[1]; velData[2] = vxb[2]; velData[3] = vxb[3];
+		velData[4] = vyb[0]; velData[5] = vyb[1]; velData[6] = vyb[2]; velData[7] = vyb[3];
+		RD.BufferUpdate(particle_buf, voff, 8, velData);
+	}
+
+	// 批量上传粒子pos+vel到GPU buffer（减少BufferUpdate调用次数）
+	public void UpdateParticlesBatch(int startIndex, Vector2[] positions, Vector2[] velocities, int count)
+	{
+		byte[] posData = new byte[count * 8];
+		byte[] velData = new byte[count * 8];
+		for (int i = 0; i < count; i++)
+		{
+			int idx = startIndex + i;
+			int off = i * 8;
+			byte[] xb = BitConverter.GetBytes(positions[idx].X);
+			byte[] yb = BitConverter.GetBytes(positions[idx].Y);
+			posData[off + 0] = xb[0]; posData[off + 1] = xb[1]; posData[off + 2] = xb[2]; posData[off + 3] = xb[3];
+			posData[off + 4] = yb[0]; posData[off + 5] = yb[1]; posData[off + 6] = yb[2]; posData[off + 7] = yb[3];
+
+			byte[] vxb = BitConverter.GetBytes(velocities[idx].X);
+			byte[] vyb = BitConverter.GetBytes(velocities[idx].Y);
+			velData[off + 0] = vxb[0]; velData[off + 1] = vxb[1]; velData[off + 2] = vxb[2]; velData[off + 3] = vxb[3];
+			velData[off + 4] = vyb[0]; velData[off + 5] = vyb[1]; velData[off + 6] = vyb[2]; velData[off + 7] = vyb[3];
+		}
+		RD.BufferUpdate(particle_buf, (uint)(startIndex * 8), (uint)posData.Length, posData);
+		RD.BufferUpdate(particle_buf, (uint)(N * 8 + startIndex * 8), (uint)velData.Length, velData);
 	}
 
 	public void Free()

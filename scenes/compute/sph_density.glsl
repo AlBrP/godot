@@ -95,6 +95,13 @@ void main() {
     int pi = pred_offset(int(idx));
     vec2 my_pos = vec2(particle_data[pi], particle_data[pi + 1]);
 
+    // Inactive particle: zero density, skip neighbor search
+    if (my_pos.y < -500.0) {
+        particle_data[density_offset(int(idx))] = 0.0;
+        particle_data[near_density_offset(int(idx))] = 0.0;
+        return;
+    }
+
     float density = 0.0;
     float near_density = 0.0;
 

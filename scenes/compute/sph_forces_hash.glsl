@@ -37,6 +37,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int particle_count;
     int mouse_pressed;
     vec2 ground_offset;
+    int spray_mode;
 };
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
@@ -61,14 +62,26 @@ void main() {
     int vi = vel_offset(int(i));
     vec2 v = vec2(particle_data[vi], particle_data[vi + 1]);
 
+    // Inactive particle: skip simulation, stay off-screen
+    if (p.y < -500.0) {
+        // predicted_pos = pos (off-screen)
+        int pi = pred_offset(int(i));
+        particle_data[pi] = p.x;
+        particle_data[pi + 1] = p.y;
+        // 分散hash到不同桶，避免单桶爆炸
+        grid_cell_coord[i] = ivec2(int(0x80000000), int(0x80000000));
+        hash_values[i] = i % uint(particle_count);
+        return;
+    }
+
     // Apply gravity
     v.y += gravity * sub_dt;
 
     // Apply velocity damping
     v *= velocity_damping;
 
-    // Mouse interaction (local coordinates: mouse_pos and p are both local)
-    if (mouse_pressed != 0) {
+    // Mouse interaction (skip grab in spray mode)
+    if (mouse_pressed != 0 && spray_mode == 0) {
         vec2 diff = mouse_pos - p;
         float len = length(diff);
         if (len < mouse_radius_grab && len > 0.001) {

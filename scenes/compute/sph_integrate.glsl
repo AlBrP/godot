@@ -41,6 +41,10 @@ void main() {
     int i = int(idx);
 
     vec2 p = vec2(particle_data[i * 2], particle_data[i * 2 + 1]);
+
+    // Inactive particle: don't clamp to bounds
+    if (p.y < -500.0) return;
+
     int vi = vel_offset(i);
     vec2 v = vec2(particle_data[vi], particle_data[vi + 1]);
 
