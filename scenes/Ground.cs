@@ -96,6 +96,21 @@ public partial class Ground : StaticBody2D
 	public bool GpuMode => gpu_mode_;
 	private SphGpu sph_gpu_;
 
+	// 碰撞体
+	[Export] public NodePath BodyPath { get; set; }
+	[Export] public float BodyRadius { get; set; } = 50f;
+	[Export] public float ForceScale { get; set; } = 80f;
+	[Export] public float BuoyancyCoeff { get; set; } = 1.5f;  // density ratio (water/body), >1 = floats
+	[Export] public float BuoyancyRefCount { get; set; } = 350f;  // particle count in lower shell at full submersion
+	private RigidBody2D body_node_;
+	private Vector2 body_pos_ = Vector2.Zero;
+	private Vector2 body_vel_ = Vector2.Zero;
+	private bool body_enabled_ = false;
+	private Vector2 body_force_ = Vector2.Zero;
+	private float last_buoyancy_ = 0f;
+	private float last_submerged_frac_ = 0f;
+	private uint last_water_count_ = 0;
+
 
 	public override void _Ready()
 	{
@@ -163,6 +178,42 @@ public partial class Ground : StaticBody2D
 		// 默认开启Toon
 		toon_levels = 4f;
 
+		// 获取碰撞体引用
+		if (BodyPath != null && !BodyPath.IsEmpty)
+		{
+			body_node_ = GetNode<RigidBody2D>(BodyPath);
+			body_enabled_ = body_node_ != null;
+		}
+
+		// 设置球物理属性 — 低摩擦+线性阻尼防止失控
+		if (body_enabled_)
+		{
+			var physMat = new PhysicsMaterial();
+			physMat.Friction = 0.1f;
+			physMat.Rough = false;
+			body_node_.PhysicsMaterialOverride = physMat;
+			body_node_.LinearDamp = 3.0f;
+			body_node_.AngularDamp = 3.0f;
+		}
+
+		// 为CircleBody创建4个边界墙（layer 2，匹配窗口大小）
+		if (body_enabled_)
+		{
+			CreateBodyBounds();
+			// 给CircleBody添加绿色可视化
+			var poly = new Polygon2D();
+			int seg = 32;
+			var pts = new Vector2[seg];
+			for (int j = 0; j < seg; j++)
+			{
+				float a = j * Mathf.Pi * 2f / seg;
+				pts[j] = new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * BodyRadius;
+			}
+			poly.Polygon = pts;
+			poly.Color = new Color(0.3f, 0.85f, 0.4f);
+			body_node_.CallDeferred(Node.MethodName.AddChild, poly);
+		}
+
 		// 创建运行时滑块面板
 		CreateSliderPanel();
 	}
@@ -210,6 +261,46 @@ public partial class Ground : StaticBody2D
 		slider_panel_.AddChild(spec_slider_);
 
 		AddChild(slider_panel_);
+	}
+
+	private void CreateBodyBounds()
+	{
+		var vs = GetViewportRect().Size;
+		float t = 50f; // wall thickness
+
+		// 对齐水体边界：left/right = BOUND_MARGIN, top = BOUND_MARGIN, bottom = vs.Y - 100
+		float left = BOUND_MARGIN;
+		float right = vs.X - BOUND_MARGIN;
+		float top = BOUND_MARGIN;
+		float bottom = vs.Y - 100f;
+
+		float cx = (left + right) / 2f;
+		float cy = (top + bottom) / 2f;
+		float w = right - left + t * 2f;
+		float h = bottom - top + t * 2f;
+
+		// 4个边界墙: bottom, top, left, right — 内表面对齐水体边界
+		CreateBoundWall(new Vector2(cx, bottom + t / 2f), new Vector2(w, t));
+		CreateBoundWall(new Vector2(cx, top - t / 2f), new Vector2(w, t));
+		CreateBoundWall(new Vector2(left - t / 2f, cy), new Vector2(t, h));
+		CreateBoundWall(new Vector2(right + t / 2f, cy), new Vector2(t, h));
+	}
+
+	private void CreateBoundWall(Vector2 position, Vector2 size)
+	{
+		var wall = new StaticBody2D();
+		wall.CollisionLayer = 2;
+		wall.CollisionMask = 2;
+		wall.Position = position;
+
+		var shape = new RectangleShape2D();
+		shape.Size = size;
+
+		var cs = new CollisionShape2D();
+		cs.Shape = shape;
+		wall.AddChild(cs);
+
+		AddChild(wall);
 	}
 
 	public void ResetParticles()
@@ -444,6 +535,27 @@ public partial class Ground : StaticBody2D
 			// 更新位置
 			pos_[i] += vel_[i] * dt;
 
+			// 圆形碰撞体碰撞（单向：球推开粒子，小球反力）
+			if (body_enabled_)
+			{
+				Vector2 diff = pos_[i] - body_pos_;
+				float dist = diff.Length();
+				if (dist < BodyRadius && dist > 0.001f)
+				{
+					Vector2 normal = diff / dist;
+					float penetration = BodyRadius - dist;
+					pos_[i] += normal * penetration;
+					Vector2 relV = vel_[i] - body_vel_;
+					float vn = relV.Dot(normal);
+					if (vn < 0f)
+					{
+						vel_[i] = body_vel_ + (relV - (1f + collision_damping) * vn * normal);
+						// Only count active collisions (particle moving toward ball)
+						body_force_ += -normal * penetration * ForceScale * Mathf.Min(1f, Mathf.Abs(vn) / 1000f);
+					}
+				}
+			}
+
 			// 边界碰撞
 			if (pos_[i].X < bounds_min_.X)
 			{
@@ -567,6 +679,14 @@ public partial class Ground : StaticBody2D
 		float subDt = frameDt / iterations_per_frame;
 		current_sub_dt_ = subDt;
 
+		// 更新碰撞体位置+速度（转Ground局部坐标）
+		if (body_enabled_ && body_node_ != null)
+		{
+			body_pos_ = body_node_.GlobalPosition - Position;
+			body_vel_ = body_node_.LinearVelocity;
+		}
+		body_force_ = Vector2.Zero;
+
 		if (gpu_mode_)
 		{
 			// 喷水模式下累计同步所有未上传的spawn粒子到GPU
@@ -617,6 +737,100 @@ public partial class Ground : StaticBody2D
 			if (colorRect_ != null)
 				colorRect_.RequestBuild();
 		}
+
+		// Apply collision force + buoyancy to body via direct velocity change
+		// (ApplyCentralForce gets overridden by floor contact solver)
+		if (body_enabled_ && body_node_ != null)
+		{
+			Vector2 collisionForce;
+			if (gpu_mode_)
+			{
+				collisionForce = sph_gpu_.ReadBackForce();
+			}
+			else
+			{
+				collisionForce = body_force_;
+			}
+
+			// Buoyancy: count particles below ball center in shell zone
+			uint waterCountBelow = 0;
+			if (gpu_mode_)
+			{
+				var (cBelow, _) = sph_gpu_.ReadBackWaterInfo();
+				waterCountBelow = cBelow;
+			}
+			else
+			{
+				for (int wi = 0; wi < ball_nums_; wi++)
+				{
+					if (pos_[wi].Y < -500f) continue;
+					float distToBall = (pos_[wi] - body_pos_).Length();
+					if (distToBall >= BodyRadius * 0.8f && distToBall < BodyRadius * 2.5f)
+					{
+						if (pos_[wi].Y >= body_pos_.Y)
+							waterCountBelow++;
+					}
+				}
+			}
+
+			// Accumulate all velocity changes then apply once
+			Vector2 bvel = body_node_.LinearVelocity;
+
+			// Collision force
+			float maxForce = 8000f;
+			float fMag = collisionForce.Length();
+			if (fMag > maxForce)
+			{
+				collisionForce = collisionForce.Normalized() * maxForce;
+			}
+			if (fMag > 0.1f)
+			{
+				bvel += collisionForce / body_node_.Mass * frameDt;
+			}
+
+			// Buoyancy
+			if (waterCountBelow > 5)
+			{
+				float submergedFraction = Mathf.Min(1f, (float)waterCountBelow / BuoyancyRefCount);
+				float ballWeight = body_node_.Mass * gravity;
+				float buoyancy = BuoyancyCoeff * submergedFraction * ballWeight;
+				float buoyancyAccel = buoyancy / body_node_.Mass;
+				bvel.Y -= buoyancyAccel * frameDt;
+				last_buoyancy_ = buoyancy;
+				last_submerged_frac_ = submergedFraction;
+				last_water_count_ = waterCountBelow;
+			}
+			else
+			{
+				last_buoyancy_ = 0f;
+				last_submerged_frac_ = 0f;
+				last_water_count_ = waterCountBelow;
+			}
+
+			// Clamp velocity to prevent Rapier spatial partition overflow
+			float maxVel = 2000f;
+			if (bvel.LengthSquared() > maxVel * maxVel)
+			{
+				bvel = bvel.Normalized() * maxVel;
+			}
+
+			// Clamp body to water bounds (safety net)
+			Vector2 gpos = body_node_.GlobalPosition;
+			float gLeft = bounds_min_.X + Position.X + BodyRadius;
+			float gRight = bounds_max_.X + Position.X - BodyRadius;
+			float gTop = bounds_min_.Y + Position.Y + BodyRadius;
+			float gBottom = bounds_max_.Y + Position.Y - BodyRadius;
+			bool clamped = false;
+			if (gpos.X < gLeft) { gpos.X = gLeft; if (bvel.X < 0) bvel.X *= -collision_damping; clamped = true; }
+			if (gpos.X > gRight) { gpos.X = gRight; if (bvel.X > 0) bvel.X *= -collision_damping; clamped = true; }
+			if (gpos.Y < gTop) { gpos.Y = gTop; if (bvel.Y < 0) bvel.Y *= -collision_damping; clamped = true; }
+			if (gpos.Y > gBottom) { gpos.Y = gBottom; if (bvel.Y > 0) bvel.Y *= -collision_damping; clamped = true; }
+			if (clamped)
+			{
+				body_node_.GlobalPosition = gpos;
+			}
+			body_node_.LinearVelocity = bvel;
+		}
 	}
 
 	private void DispatchGpu(float frameDt, float subDt)
@@ -630,7 +844,9 @@ public partial class Ground : StaticBody2D
 			mouse_pressed_, mouse_position_,
 			120f, 30f, 1500f,   // mouseRadiusGrab, mouseRadiusStick, grabSpeed
 			Position,
-			spray_mode_         // sprayMode
+			spray_mode_,        // sprayMode
+			body_pos_, BodyRadius, body_enabled_,  // body collision
+			body_vel_, ForceScale  // body velocity + force scale
 		);
 		sph_gpu_.DispatchFrame(frameDt, iterations_per_frame);
 	}
@@ -763,5 +979,17 @@ public partial class Ground : StaticBody2D
 		var mode_text = spray_mode_ ? "SPRAY" : "GRAB";
 		DrawString(font, new Vector2(right_x - font.GetStringSize(mode_text).X, y), mode_text, fontSize: 14,
 			modulate: spray_mode_ ? Colors.Cyan : Colors.Green);
+
+		// 画圆形碰撞体
+		if (body_enabled_)
+		{
+			DrawCircle(body_pos_, BodyRadius, new Color(0.4f, 0.4f, 0.4f, 0.5f));
+			DrawCircle(body_pos_, BodyRadius, new Color(0.8f, 0.8f, 0.8f, 0.8f), false, 2f);
+
+			// 浮力调试信息
+			var buoy_text = $"Buoy:{last_buoyancy_:0} Sub:{last_submerged_frac_:0.0%} Lo:{last_water_count_}";
+			DrawString(font, new Vector2(body_pos_.X - 70, body_pos_.Y - BodyRadius - 22), buoy_text, fontSize: 13,
+				modulate: last_buoyancy_ > 1f ? Colors.Yellow : Colors.Gray);
+		}
 	}
 }

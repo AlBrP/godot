@@ -1,4 +1,4 @@
-[gd_scene load_steps=5 format=3 uid="uid://be8ticxudt62q"]
+[gd_scene load_steps=6 format=3 uid="uid://be8ticxudt62q"]
 
 [ext_resource type="Shader" path="res://scenes/metaball.gdshader" id="1_metaball"]
 [ext_resource type="Script" path="res://scenes/Color_Rect.cs" id="2_gl22a"]
@@ -33,6 +33,9 @@ shader_parameter/spec_strength = 0.35
 shader_parameter/toon_levels = 0.0
 shader_parameter/debug_mode = 0
 
+[sub_resource type="CircleShape2D" id="CircleShape2D_body"]
+radius = 50.0
+
 [node name="main" type="Node2D"]
 
 [node name="CanvasLayer" type="CanvasLayer" parent="."]
@@ -63,3 +66,13 @@ script = ExtResource("2_gl22a")
 
 [node name="Ground" parent="." instance=ExtResource("2_j27gb")]
 position = Vector2(-5, 22)
+BodyPath = NodePath("../CircleBody")
+
+[node name="CircleBody" type="RigidBody2D" parent="."]
+position = Vector2(576, 400)
+collision_layer = 2
+collision_mask = 2
+mass = 2.0
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="CircleBody"]
+shape = SubResource("CircleShape2D_body")
