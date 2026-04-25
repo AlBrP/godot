@@ -1,0 +1,16 @@
+{
+  "env": {
+    "CLAUDE_CODE_EFFORT_LEVEL": "max"
+  },
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.godotengine.org)",
+      "WebFetch(domain:diglib.eg.org)",
+      "WebFetch(domain:www.yumpu.com)",
+      "WebFetch(domain:cg.informatik.uni-freiburg.de)",
+      "Skill(update-config)",
+      "WebFetch(domain:api-docs.deepseek.com)"
+    ]
+  }
+}

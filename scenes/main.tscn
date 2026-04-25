@@ -66,7 +66,8 @@ script = ExtResource("2_gl22a")
 
 [node name="Ground" parent="." instance=ExtResource("2_j27gb")]
 position = Vector2(-5, 22)
-BodyPath = NodePath("../CircleBody")
+BodyPath0 = NodePath("../CircleBody")
+BodyPath1 = NodePath("../CircleBody2")
 
 [node name="CircleBody" type="RigidBody2D" parent="."]
 position = Vector2(576, 400)
@@ -75,4 +76,13 @@ collision_mask = 2
 mass = 2.0
 
 [node name="CollisionShape2D" type="CollisionShape2D" parent="CircleBody"]
+shape = SubResource("CircleShape2D_body")
+
+[node name="CircleBody2" type="RigidBody2D" parent="."]
+position = Vector2(480, 300)
+collision_layer = 2
+collision_mask = 2
+mass = 2.0
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="CircleBody2"]
 shape = SubResource("CircleShape2D_body")

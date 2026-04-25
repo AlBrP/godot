@@ -4,6 +4,7 @@
 layout(local_size_x = 256) in;
 
 const int N = 5000;
+const int MAX_BODIES = 4;
 
 layout(set = 0, binding = 0, std430) buffer ParticleBuffer {
     float particle_data[];
@@ -25,7 +26,23 @@ layout(set = 0, binding = 3, std430) readonly buffer HashTableBuffer {
 };
 
 layout(set = 0, binding = 4, std430) readonly buffer SdfBuffer {
-    float sdf_data[];          // 64x64 SDF values
+    float sdf_data[];          // MAX_BODIES * 64 * 64 SDF values
+};
+
+struct Body {
+    vec2 pos;
+    vec2 vel;
+    vec2 sdf_half_extents;
+    float angle;
+    float shape_radius;
+    float boundary_volume;
+    float bp_scale;
+    int enabled;
+    float _pad;
+};
+
+layout(set = 0, binding = 8, std430) readonly buffer BodyDataBuffer {
+    Body bodies[MAX_BODIES];
 };
 
 layout(set = 0, binding = 7, std140) uniform Params {
@@ -52,15 +69,18 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int mouse_pressed;
     vec2 ground_offset;
     int spray_mode;
-    float boundary_volume;
-    vec2 body_pos;
-    vec2 sdf_half_extents;
-    int body_enabled;
-    float boundary_pressure_scale;
-    vec2 body_vel;
-    float body_angle;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+    float _pad3;
+    float _pad4;
+    int body_count;
+    float _pad5;
+    float _pad6;
+    float _pad7;
+    float _pad8;
     float fluid_particle_mass;
-    float sdf_shape_radius;
+    float _pad9;
     float target_density;
 };
 
@@ -90,13 +110,12 @@ vec2 rotate2d(vec2 v, float angle) {
     return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
 }
 
-float sampleSdf(vec2 localPos) {
-    float ux = (localPos.x / sdf_half_extents.x + 1.0) * 0.5;
-    float uy = (localPos.y / sdf_half_extents.y + 1.0) * 0.5;
-    const int SDF_SIZE = 64;
-    int ix = int(clamp(ux * float(SDF_SIZE), 0.0, float(SDF_SIZE - 1)));
-    int iy = int(clamp(uy * float(SDF_SIZE), 0.0, float(SDF_SIZE - 1)));
-    return sdf_data[iy * SDF_SIZE + ix];
+float sampleSdf(vec2 localPos, int bodyIdx) {
+    float ux = (localPos.x / bodies[bodyIdx].sdf_half_extents.x + 1.0) * 0.5;
+    float uy = (localPos.y / bodies[bodyIdx].sdf_half_extents.y + 1.0) * 0.5;
+    int ix = int(clamp(ux * 64.0, 0.0, 63.0));
+    int iy = int(clamp(uy * 64.0, 0.0, 63.0));
+    return sdf_data[bodyIdx * 4096 + iy * 64 + ix];
 }
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
@@ -124,7 +143,6 @@ void main() {
     int pi = pred_offset(int(idx));
     vec2 my_pos = vec2(particle_data[pi], particle_data[pi + 1]);
 
-    // Inactive particle: zero density, skip neighbor search
     if (my_pos.y < -500.0) {
         particle_data[density_offset(int(idx))] = 0.0;
         particle_data[near_density_offset(int(idx))] = 0.0;
@@ -141,11 +159,9 @@ void main() {
         for (int dx = -1; dx <= 1; dx++) {
             ivec2 neighbor_cell = my_cell + ivec2(dx, dy);
             uint h = hash_cell(neighbor_cell);
-
             int start = ht_start[h];
             int end = ht_end[h];
             if (start < 0) continue;
-
             for (int j = start; j <= end; j++) {
                 uint neighbor_idx = sorted_indices[j];
                 int pn = pred_offset(int(neighbor_idx));
@@ -161,20 +177,18 @@ void main() {
         }
     }
 
-    // Boundary density contribution via SDF (Akinci 2012 adaptation)
-    // Body surface acts as a "virtual wall" of boundary particles,
-    // contributing density to nearby fluid particles.
-    if (body_enabled != 0) {
-        vec2 localPos = rotate2d(my_pos - body_pos, -body_angle);
-        if (abs(localPos.x) < sdf_half_extents.x && abs(localPos.y) < sdf_half_extents.y) {
-            float d = sampleSdf(localPos);
-            // Contribute within kernel radius of surface (both outside AND inside body)
-            if (d > -smoothing_radius && d < smoothing_radius) {
-                float dist = abs(d); // distance to surface
-                float bv = target_density * boundary_volume;
-                density += bv * spiky_pow2(dist);
-                near_density += bv * spiky_pow3(dist);
-            }
+    // Boundary density contribution from all active bodies
+    for (int b = 0; b < body_count; b++) {
+        if (bodies[b].enabled == 0) continue;
+        vec2 localPos = rotate2d(my_pos - bodies[b].pos, -bodies[b].angle);
+        if (abs(localPos.x) >= bodies[b].sdf_half_extents.x || abs(localPos.y) >= bodies[b].sdf_half_extents.y) continue;
+
+        float d = sampleSdf(localPos, b);
+        if (d > -smoothing_radius && d < smoothing_radius) {
+            float dist = abs(d);
+            float bv = target_density * bodies[b].boundary_volume;
+            density += bv * spiky_pow2(dist);
+            near_density += bv * spiky_pow3(dist);
         }
     }
 

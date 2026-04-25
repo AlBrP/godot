@@ -4,6 +4,7 @@
 layout(local_size_x = 256) in;
 
 const int N = 5000;
+const int MAX_BODIES = 4;
 
 layout(set = 0, binding = 0, std430) buffer ParticleBuffer {
     float particle_data[];
@@ -29,7 +30,23 @@ layout(set = 0, binding = 4, std430) readonly buffer SdfBuffer {
 };
 
 layout(set = 0, binding = 5, std430) buffer ForceAccum {
-    int force_accum[3];  // [0]=fx, [1]=fy, [2]=torque
+    int force_accum[];  // MAX_BODIES * 3: [fx0, fy0, tq0, fx1, fy1, tq1, ...]
+};
+
+struct Body {
+    vec2 pos;
+    vec2 vel;
+    vec2 sdf_half_extents;
+    float angle;
+    float shape_radius;
+    float boundary_volume;
+    float bp_scale;
+    int enabled;
+    float _pad;
+};
+
+layout(set = 0, binding = 8, std430) readonly buffer BodyDataBuffer {
+    Body bodies[MAX_BODIES];
 };
 
 layout(set = 0, binding = 7, std140) uniform Params {
@@ -56,15 +73,18 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int mouse_pressed;
     vec2 ground_offset;
     int spray_mode;
-    float boundary_volume;
-    vec2 body_pos;
-    vec2 sdf_half_extents;
-    int body_enabled;
-    float boundary_pressure_scale;
-    vec2 body_vel;
-    float body_angle;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+    float _pad3;
+    float _pad4;
+    int body_count;
+    float _pad5;
+    float _pad6;
+    float _pad7;
+    float _pad8;
     float fluid_particle_mass;
-    float sdf_shape_radius;
+    float _pad9;
     float target_density;
 };
 
@@ -102,20 +122,19 @@ vec2 rotate2d(vec2 v, float angle) {
     return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
 }
 
-float sampleSdf(vec2 localPos) {
-    float ux = (localPos.x / sdf_half_extents.x + 1.0) * 0.5;
-    float uy = (localPos.y / sdf_half_extents.y + 1.0) * 0.5;
-    const int SDF_SIZE = 64;
-    int ix = int(clamp(ux * float(SDF_SIZE), 0.0, float(SDF_SIZE - 1)));
-    int iy = int(clamp(uy * float(SDF_SIZE), 0.0, float(SDF_SIZE - 1)));
-    return sdf_data[iy * SDF_SIZE + ix];
+float sampleSdf(vec2 localPos, int bodyIdx) {
+    float ux = (localPos.x / bodies[bodyIdx].sdf_half_extents.x + 1.0) * 0.5;
+    float uy = (localPos.y / bodies[bodyIdx].sdf_half_extents.y + 1.0) * 0.5;
+    int ix = int(clamp(ux * 64.0, 0.0, 63.0));
+    int iy = int(clamp(uy * 64.0, 0.0, 63.0));
+    return sdf_data[bodyIdx * 4096 + iy * 64 + ix];
 }
 
-vec2 sampleSdfNormal(vec2 localPos) {
-    float epsX = 2.0 * sdf_half_extents.x / 64.0;
-    float epsY = 2.0 * sdf_half_extents.y / 64.0;
-    float dx = (sampleSdf(localPos + vec2(epsX, 0.0)) - sampleSdf(localPos - vec2(epsX, 0.0))) / (2.0 * epsX);
-    float dy = (sampleSdf(localPos + vec2(0.0, epsY)) - sampleSdf(localPos - vec2(0.0, epsY))) / (2.0 * epsY);
+vec2 sampleSdfNormal(vec2 localPos, int bodyIdx) {
+    float epsX = 2.0 * bodies[bodyIdx].sdf_half_extents.x / 64.0;
+    float epsY = 2.0 * bodies[bodyIdx].sdf_half_extents.y / 64.0;
+    float dx = (sampleSdf(localPos + vec2(epsX, 0.0), bodyIdx) - sampleSdf(localPos - vec2(epsX, 0.0), bodyIdx)) / (2.0 * epsX);
+    float dy = (sampleSdf(localPos + vec2(0.0, epsY), bodyIdx) - sampleSdf(localPos - vec2(0.0, epsY), bodyIdx)) / (2.0 * epsY);
     vec2 grad = vec2(dx, dy);
     float len = length(grad);
     return len > 0.0001 ? grad / len : vec2(0.0, -1.0);
@@ -155,7 +174,6 @@ void main() {
     int pi = pred_offset(idxi);
     vec2 my_pos = vec2(particle_data[pi], particle_data[pi + 1]);
 
-    // Inactive particle: skip force computation
     if (my_pos.y < -500.0) return;
 
     float my_density = particle_data[density_offset(idxi)];
@@ -176,21 +194,17 @@ void main() {
         for (int dx = -1; dx <= 1; dx++) {
             ivec2 neighbor_cell = my_cell + ivec2(dx, dy);
             uint h = hash_cell(neighbor_cell);
-
             int start = ht_start[h];
             int end = ht_end[h];
             if (start < 0) continue;
-
             for (int j = start; j <= end; j++) {
                 uint neighbor_idx = sorted_indices[j];
                 if (int(neighbor_idx) == idxi) continue;
-
                 int pn = pred_offset(int(neighbor_idx));
                 vec2 other_pos = vec2(particle_data[pn], particle_data[pn + 1]);
                 vec2 diff = other_pos - my_pos;
                 float dist_sq = dot(diff, diff);
                 if (dist_sq >= sr_sq || dist_sq < 0.000001) continue;
-
                 float dist = sqrt(dist_sq);
                 vec2 dir = diff / dist;
 
@@ -198,7 +212,6 @@ void main() {
                 float nb_near_density = particle_data[near_density_offset(int(neighbor_idx))];
                 float nb_pressure = pressure_from_density(nb_density);
                 float nb_near_pressure = near_pressure_from_density(nb_near_density);
-
                 float shared_pressure = (my_pressure + nb_pressure) * 0.5;
                 float shared_near_pressure = (my_near_pressure + nb_near_pressure) * 0.5;
 
@@ -216,39 +229,30 @@ void main() {
     particle_data[vi] += acceleration.x * sub_dt + viscosity_force.x * viscosity_strength * sub_dt;
     particle_data[vi + 1] += acceleration.y * sub_dt + viscosity_force.y * viscosity_strength * sub_dt;
 
-    // Boundary pressure force via SDF (Akinci 2012: Versatile Rigid-Fluid Coupling)
-    // The body boundary participates as "virtual boundary particles".
-    // Pressure force on fluid from boundary, with equal-and-opposite reaction on body.
-    if (body_enabled != 0) {
-        vec2 localPos = rotate2d(my_pos - body_pos, -body_angle);
-        if (abs(localPos.x) < sdf_half_extents.x && abs(localPos.y) < sdf_half_extents.y) {
-            float d = sampleSdf(localPos);
-            // Apply within kernel radius of surface (both outside AND inside body)
-            if (d > -smoothing_radius && d < smoothing_radius) {
-                vec2 localNormal = sampleSdfNormal(localPos);
-                vec2 sdf_normal = rotate2d(localNormal, body_angle);  // world-space outward normal
+    // Boundary pressure force — loop over all active bodies
+    for (int b = 0; b < body_count; b++) {
+        if (bodies[b].enabled == 0) continue;
+        vec2 localPos = rotate2d(my_pos - bodies[b].pos, -bodies[b].angle);
+        if (abs(localPos.x) >= bodies[b].sdf_half_extents.x || abs(localPos.y) >= bodies[b].sdf_half_extents.y) continue;
 
-                // Direct pressure-based boundary force (simpler and stronger than kernel gradient)
-                // Force = pressure * boundary_pressure_scale in surface normal direction.
-                // Only positive pressure (compression) pushes; negative pressure (tension) ignored.
-                float press = max(my_pressure, 0.0);
-                float force_magnitude = press * boundary_pressure_scale;
-                vec2 force_on_fluid = sdf_normal * force_magnitude;
+        float d = sampleSdf(localPos, b);
+        if (d > -smoothing_radius && d < smoothing_radius) {
+            vec2 localNormal = sampleSdfNormal(localPos, b);
+            vec2 sdf_normal = rotate2d(localNormal, bodies[b].angle);
 
-                // Apply to fluid velocity (acceleration = force / density)
-                particle_data[vi] += force_on_fluid.x / my_density * sub_dt;
-                particle_data[vi + 1] += force_on_fluid.y / my_density * sub_dt;
+            float press = max(my_pressure, 0.0);
+            float force_magnitude = press * bodies[b].bp_scale;
+            vec2 force_on_fluid = sdf_normal * force_magnitude;
 
-                // Newton's 3rd law: equal-and-opposite reaction on rigid body
-                // Contact point is on body surface: xb = fluid_pos - sdf_normal * d
-                vec2 contact_point = my_pos - sdf_normal * d;
-                vec2 reaction_force = -force_on_fluid * fluid_particle_mass;
-                atomicAdd(force_accum[0], int(reaction_force.x));
-                atomicAdd(force_accum[1], int(reaction_force.y));
-                // Torque = (contact_point - body_COM) x reaction_force
-                vec2 arm = contact_point - body_pos;
-                atomicAdd(force_accum[2], int(arm.x * reaction_force.y - arm.y * reaction_force.x));
-            }
+            particle_data[vi] += force_on_fluid.x / my_density * sub_dt;
+            particle_data[vi + 1] += force_on_fluid.y / my_density * sub_dt;
+
+            vec2 contact_point = my_pos - sdf_normal * d;
+            vec2 reaction_force = -force_on_fluid * fluid_particle_mass;
+            atomicAdd(force_accum[b * 3 + 0], int(reaction_force.x));
+            atomicAdd(force_accum[b * 3 + 1], int(reaction_force.y));
+            vec2 arm = contact_point - bodies[b].pos;
+            atomicAdd(force_accum[b * 3 + 2], int(arm.x * reaction_force.y - arm.y * reaction_force.x));
         }
     }
 }

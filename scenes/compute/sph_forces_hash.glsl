@@ -38,15 +38,18 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int mouse_pressed;
     vec2 ground_offset;
     int spray_mode;
-    float boundary_volume;
-    vec2 body_pos;
-    vec2 sdf_half_extents;
-    int body_enabled;
-    float boundary_pressure_scale;
-    vec2 body_vel;
-    float body_angle;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+    float _pad3;
+    float _pad4;
+    int body_count;
+    float _pad5;
+    float _pad6;
+    float _pad7;
+    float _pad8;
     float fluid_particle_mass;
-    float sdf_shape_radius;
+    float _pad9;
     float target_density;
 };
 

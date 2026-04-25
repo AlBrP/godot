@@ -40,6 +40,20 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int particle_count;
     int mouse_pressed;
     vec2 ground_offset;
+    int spray_mode;
+    float _pad_sp0;
+    float _pad_sp1;
+    float _pad_sp2;
+    float _pad_sp3;
+    float _pad_sp4;
+    int body_count;
+    float _pad_sp5;
+    float _pad_sp6;
+    float _pad_sp7;
+    float _pad_sp8;
+    float fluid_particle_mass;
+    float _pad_sp9;
+    float target_density;
 };
 
 void main() {

@@ -21,7 +21,7 @@ uniform float density_scale = 0.3;
 uniform float edge_sharpness = 0.82;
 uniform float field_scale = 0.008;
 
-// 卡通水配色
+// Toon water palette
 uniform vec3 water_deep      = vec3(0.04, 0.18, 0.42);
 uniform vec3 water_mid       = vec3(0.08, 0.42, 0.68);
 uniform vec3 water_light     = vec3(0.18, 0.62, 0.85);
@@ -31,15 +31,15 @@ uniform vec3 water_spec      = vec3(1.00, 1.00, 1.00);
 uniform float time = 0.0;
 
 uniform float spec_strength = 0.5;
-uniform float toon_levels = 0.0;  // 0=关闭(连续渐变), >0=量化色阶数
+uniform float toon_levels = 0.0;  // 0=off (continuous gradient), >0=quantized levels
 
 uniform int debug_mode = 0;
 
-// 哈希常数（必须与C#端一致）
+// Hash constants (must match C# side)
 const int HASH_K1 = 15823;
 const int HASH_K2 = 9737333;
 
-// 空间哈希函数（与C# HashCell完全一致）
+// Spatial hash function (must match C# HashCell exactly)
 uint hash_cell(ivec2 cell) {
 	uint cx = uint(cell.x);
 	uint cy = uint(cell.y);
@@ -59,7 +59,7 @@ void fragment() {
 
 	vec2 worldPos = UV * viewport_size;
 
-	// 包围盒 early-discard
+	// Bbox early-discard
 	float cutoff = sigma * 3.0;
 	if (worldPos.x < bbox_min.x - cutoff || worldPos.x > bbox_max.x + cutoff ||
 		worldPos.y < bbox_min.y - cutoff || worldPos.y > bbox_max.y + cutoff) discard;
@@ -70,26 +70,26 @@ void fragment() {
 	float inv_2sq = 1.0 / (2.0 * sigma * sigma);
 	float cutoff_sq = 9.0 * sigma * sigma;
 
-	// 计算当前像素在hash grid中的cell（用local坐标）
+	// Compute hash grid cell for current pixel (using local coords)
 	vec2 localPos = worldPos - ground_offset;
 	ivec2 center_cell = ivec2(floor(localPos / grid_cell_size));
 
-	// 动态搜索半径：保证覆盖3σ
+	// Dynamic search radius: ensure 3-sigma coverage
 	int search_r = int(ceil(3.0 * sigma / grid_cell_size));
-	search_r = min(search_r, 6); // 安全上限
+	search_r = min(search_r, 6); // safety cap
 
 	int tex_w = int(texture_size.x);
 
-	// 遍历周围 (2*search_r+1)^2 个cell
+	// Iterate surrounding (2*search_r+1)^2 cells
 	for (int dy = -6; dy <= 6; dy++) {
 		for (int dx = -6; dx <= 6; dx++) {
-			// 超出搜索半径则跳过（编译器可展开常量循环）
+			// Skip if outside search radius (compiler can unroll constant loop)
 			if (abs(dx) > search_r || abs(dy) > search_r) continue;
 
 			ivec2 neighbor_cell = center_cell + ivec2(dx, dy);
 			uint h = hash_cell(neighbor_cell);
 
-			// 查询hash lookup纹理
+			// Query hash lookup texture
 			int hx = int(h) % tex_w;
 			int hy = int(h) / tex_w;
 			vec2 range = texelFetch(hash_lookup_texture, ivec2(hx, hy), 0).rg;
@@ -97,10 +97,10 @@ void fragment() {
 			int start = int(range.r);
 			int end = int(range.g);
 
-			// 无效bucket
+			// Invalid bucket
 			if (start < 0) continue;
 
-			// 遍历该bucket中的所有粒子
+			// Iterate all particles in this bucket
 			for (int j = start; j <= end; j++) {
 				int px = j % tex_w;
 				int py = j / tex_w;
@@ -134,7 +134,7 @@ void fragment() {
 
 		float n = total * field_scale;
 
-		// Toon量化：将连续n映射到离散色阶
+		// Toon quantization: map continuous n to discrete levels
 		if (toon_levels > 0.5) {
 			n = floor(n * toon_levels) / toon_levels;
 		}
@@ -173,7 +173,7 @@ void fragment() {
 
 		color = mix(color, water_foam, foam);
 
-		// 速度驱动高光：流速越快越亮
+		// Velocity-driven specular: faster flow = brighter
 		float vel_mag = length(avg_vel);
 		float spec = smoothstep(0.005, 0.06, vel_mag);
 		spec *= (0.4 + 0.6 * pow(max(dot(normalize(avg_vel + vec2(0.0001)), vec2(0.35, -0.6)), 0.0), 2.0));
