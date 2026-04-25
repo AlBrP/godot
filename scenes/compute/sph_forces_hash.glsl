@@ -38,6 +38,16 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int mouse_pressed;
     vec2 ground_offset;
     int spray_mode;
+    float boundary_volume;
+    vec2 body_pos;
+    vec2 sdf_half_extents;
+    int body_enabled;
+    float boundary_pressure_scale;
+    vec2 body_vel;
+    float body_angle;
+    float fluid_particle_mass;
+    float sdf_shape_radius;
+    float target_density;
 };
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
@@ -68,7 +78,7 @@ void main() {
         int pi = pred_offset(int(i));
         particle_data[pi] = p.x;
         particle_data[pi + 1] = p.y;
-        // 分散hash到不同桶，避免单桶爆炸
+        // scatter inactive hashes to avoid bucket overflow
         grid_cell_coord[i] = ivec2(int(0x80000000), int(0x80000000));
         hash_values[i] = i % uint(particle_count);
         return;

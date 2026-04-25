@@ -42,6 +42,17 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int particle_count;
     int mouse_pressed;
     vec2 ground_offset;
+    int spray_mode;
+    float boundary_volume;
+    vec2 body_pos;
+    vec2 sdf_half_extents;
+    int body_enabled;
+    float boundary_pressure_scale;
+    vec2 body_vel;
+    float body_angle;
+    float fluid_particle_mass;
+    float sdf_shape_radius;
+    float target_density;
 };
 
 layout(set = 1, binding = 0, rgba16f) uniform image2D position_tex;

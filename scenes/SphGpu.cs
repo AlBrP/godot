@@ -28,11 +28,13 @@ public class SphGpu
 	public Texture2Drd PositionTex { get; private set; }
 	public Texture2Drd HashLookupTex { get; private set; }
 
-	// Force accumulator buffer (2 × float, for GPU→CPU readback)
+	// Force accumulator: 12B [fx:int, fy:int, torque:int]
 	private Rid force_accum_buf;
 
-	// Water info buffer (water_count + water_y_min_scaled, for Archimedes buoyancy)
-	private Rid water_info_buf;
+	// SDF storage: 64x64 floats = 16KB
+	private Rid sdf_buf;
+	private const int SDF_SIZE = 64;
+	private const int SDF_BUF_SIZE = SDF_SIZE * SDF_SIZE * 4;
 
 	// Shader + Pipeline RIDs
 	private Rid shader_forces_hash;
@@ -127,9 +129,8 @@ public class SphGpu
 		HashLookupTex = new Texture2Drd();
 		HashLookupTex.TextureRdRid = hashlookup_tex_rid;
 
-		// Force accumulator buffer: 8 bytes (2 × uint for atomicAdd, reinterpreted as float on CPU)
-		force_accum_buf = RD.StorageBufferCreate(8, new byte[8]);
-		water_info_buf = RD.StorageBufferCreate(8, new byte[8]);
+		force_accum_buf = RD.StorageBufferCreate(12, new byte[12]);
+		sdf_buf = RD.StorageBufferCreate(SDF_BUF_SIZE, new byte[SDF_BUF_SIZE]);
 	}
 
 	private Rid LoadComputeShader(string path)
@@ -253,29 +254,30 @@ public class SphGpu
 			MakeUniformUniform(7, params_ubuf),
 		});
 
-		// Pass 7: Density — particle(0), hash(1), sort(2), hashtable(3), params(7)
+		// Pass 7: Density — particle(0), hash(1), sort(2), hashtable(3), sdf(4), params(7)
 		uniform_set_density = MakeUniformSet(shader_density, 0, new Godot.Collections.Array<RDUniform> {
 			MakeStorageUniform(0, particle_buf),
 			MakeStorageUniform(1, hash_buf),
 			MakeStorageUniform(2, sort_buf),
 			MakeStorageUniform(3, hashtable_buf),
+			MakeStorageUniform(4, sdf_buf),
 			MakeUniformUniform(7, params_ubuf),
 		});
 
-		// Pass 8: Pressure+Viscosity — particle(0), hash(1), sort(2), hashtable(3), params(7)
+		// Pass 8: Pressure+Viscosity — particle(0), hash(1), sort(2), hashtable(3), sdf(4), force_accum(5), params(7)
 		uniform_set_pressure_visc = MakeUniformSet(shader_pressure_visc, 0, new Godot.Collections.Array<RDUniform> {
 			MakeStorageUniform(0, particle_buf),
 			MakeStorageUniform(1, hash_buf),
 			MakeStorageUniform(2, sort_buf),
 			MakeStorageUniform(3, hashtable_buf),
+			MakeStorageUniform(4, sdf_buf),
+			MakeStorageUniform(5, force_accum_buf),
 			MakeUniformUniform(7, params_ubuf),
 		});
 
-		// Pass 9: Integrate — particle(0), force_accum(1), water_info(2), params(7)
+		// Pass 9: Integrate — particle(0), params(7) (no more SDF collision or water tracking)
 		uniform_set_integrate = MakeUniformSet(shader_integrate, 0, new Godot.Collections.Array<RDUniform> {
 			MakeStorageUniform(0, particle_buf),
-			MakeStorageUniform(1, force_accum_buf),
-			MakeStorageUniform(2, water_info_buf),
 			MakeUniformUniform(7, params_ubuf),
 		});
 
@@ -301,8 +303,9 @@ public class SphGpu
 		bool mousePressed, Vector2 mousePos,
 		float mouseRadiusGrab, float mouseRadiusStick, float grabSpeed,
 		Vector2 groundOffset, bool sprayMode,
-		Vector2 bodyPos, float bodyRadius, bool bodyEnabled,
-		Vector2 bodyVel, float forceScale)
+		Vector2 bodyPos, Vector2 sdfHalfExtents, bool bodyEnabled,
+		Vector2 bodyVel, float bodyAngle, float sdfShapeRadius,
+		float boundaryVolume, float boundaryPressureScale, float fluidParticleMass, float targetDensity)
 	{
 		byte[] data = new byte[PARAMS_BUF_SIZE];
 		int offset = 0;
@@ -329,16 +332,16 @@ public class SphGpu
 		WriteInt(data, ref offset, mousePressed ? 1 : 0);   // 92
 		WriteVec2(data, ref offset, groundOffset);           // 96
 		WriteInt(data, ref offset, sprayMode ? 1 : 0);      // 104
-		WriteFloat(data, ref offset, 0f);                    // 108 padding for vec2 alignment
+		WriteFloat(data, ref offset, boundaryVolume);        // 108
 		WriteVec2(data, ref offset, bodyPos);                // 112
-		WriteFloat(data, ref offset, bodyRadius);            // 120
-		WriteInt(data, ref offset, bodyEnabled ? 1 : 0);    // 124
-		WriteVec2(data, ref offset, bodyVel);               // 128
-		WriteFloat(data, ref offset, forceScale);            // 136
-		WriteFloat(data, ref offset, 0f);                    // 140 padding
-		WriteFloat(data, ref offset, 0f);                    // 144 padding
-		WriteFloat(data, ref offset, 0f);                    // 148 padding
-		WriteFloat(data, ref offset, 0f);                    // 152 padding
+		WriteVec2(data, ref offset, sdfHalfExtents);         // 120
+		WriteInt(data, ref offset, bodyEnabled ? 1 : 0);    // 128
+		WriteFloat(data, ref offset, boundaryPressureScale); // 132
+		WriteVec2(data, ref offset, bodyVel);               // 136
+		WriteFloat(data, ref offset, bodyAngle);            // 144
+		WriteFloat(data, ref offset, fluidParticleMass);     // 148
+		WriteFloat(data, ref offset, sdfShapeRadius);         // 152
+		WriteFloat(data, ref offset, targetDensity);          // 156
 		// Total: 160 bytes
 
 		RD.BufferUpdate(params_ubuf, 0, PARAMS_BUF_SIZE, data);
@@ -373,15 +376,10 @@ public class SphGpu
 			RD.BufferClear(prefix_buf, 0, PREFIX_BUF_SIZE);
 			RD.BufferClear(block_sums_buf, 0, BLOCK_SUMS_BUF_SIZE);
 
-			// Clear force accumulator + water info (first substep only — accumulate across substeps)
+			// Clear force accumulator (first substep only — accumulate across substeps)
 			if (iter == 0)
 			{
-				RD.BufferClear(force_accum_buf, 0, 8);
-				// Init water_info: both counts = 0
-				byte[] wiInit = new byte[8];
-				BitConverter.GetBytes((uint)0).CopyTo(wiInit, 0);
-				BitConverter.GetBytes((uint)0).CopyTo(wiInit, 4);
-				RD.BufferUpdate(water_info_buf, 0, 8, wiInit);
+				RD.BufferClear(force_accum_buf, 0, 12);
 			}
 
 			var cl = RD.ComputeListBegin();
@@ -483,21 +481,25 @@ public class SphGpu
 		return RD.BufferGetData(particle_buf, 0, PARTICLE_BUF_SIZE);
 	}
 
-	public Vector2 ReadBackForce()
+	public (Vector2 force, float torque) ReadBackForce()
 	{
-		byte[] data = RD.BufferGetData(force_accum_buf, 0, 8);
+		byte[] data = RD.BufferGetData(force_accum_buf, 0, 12);
 		int ix = BitConverter.ToInt32(data, 0);
 		int iy = BitConverter.ToInt32(data, 4);
-		return new Vector2((float)ix, (float)iy);
+		int it = BitConverter.ToInt32(data, 8);
+		return (new Vector2((float)ix, (float)iy), (float)it);
 	}
 
-	// Read back water info: (count_below_center, count_above_center)
-	public (uint countBelow, uint countAbove) ReadBackWaterInfo()
+	public void UploadSdfTexture(float[] sdfData)
 	{
-		byte[] data = RD.BufferGetData(water_info_buf, 0, 8);
-		uint countBelow = BitConverter.ToUInt32(data, 0);
-		uint countAbove = BitConverter.ToUInt32(data, 4);
-		return (countBelow, countAbove);
+		byte[] bufData = new byte[SDF_BUF_SIZE];
+		for (int i = 0; i < SDF_SIZE * SDF_SIZE; i++)
+		{
+			byte[] bytes = BitConverter.GetBytes(sdfData[i]);
+			bufData[i * 4 + 0] = bytes[0]; bufData[i * 4 + 1] = bytes[1];
+			bufData[i * 4 + 2] = bytes[2]; bufData[i * 4 + 3] = bytes[3];
+		}
+		RD.BufferUpdate(sdf_buf, 0, SDF_BUF_SIZE, bufData);
 	}
 
 	// 上传单个粒子的pos和vel到GPU buffer
@@ -548,7 +550,6 @@ public class SphGpu
 		RD.FreeRid(position_tex_rid);
 		RD.FreeRid(hashlookup_tex_rid);
 		RD.FreeRid(force_accum_buf);
-		RD.FreeRid(water_info_buf);
 		RD.FreeRid(particle_buf);
 		RD.FreeRid(hash_buf);
 		RD.FreeRid(sort_buf);

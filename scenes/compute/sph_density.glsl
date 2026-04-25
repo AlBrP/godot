@@ -24,6 +24,10 @@ layout(set = 0, binding = 3, std430) readonly buffer HashTableBuffer {
     int ht_end[];
 };
 
+layout(set = 0, binding = 4, std430) readonly buffer SdfBuffer {
+    float sdf_data[];          // 64x64 SDF values
+};
+
 layout(set = 0, binding = 7, std140) uniform Params {
     vec2 bounds_min;
     vec2 bounds_max;
@@ -47,6 +51,17 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int particle_count;
     int mouse_pressed;
     vec2 ground_offset;
+    int spray_mode;
+    float boundary_volume;
+    vec2 body_pos;
+    vec2 sdf_half_extents;
+    int body_enabled;
+    float boundary_pressure_scale;
+    vec2 body_vel;
+    float body_angle;
+    float fluid_particle_mass;
+    float sdf_shape_radius;
+    float target_density;
 };
 
 float spiky_pow2_scale;
@@ -68,6 +83,20 @@ float spiky_pow3(float dst) {
     if (dst >= smoothing_radius) return 0.0;
     float v = smoothing_radius - dst;
     return v * v * v * spiky_pow3_scale;
+}
+
+vec2 rotate2d(vec2 v, float angle) {
+    float c = cos(angle), s = sin(angle);
+    return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+float sampleSdf(vec2 localPos) {
+    float ux = (localPos.x / sdf_half_extents.x + 1.0) * 0.5;
+    float uy = (localPos.y / sdf_half_extents.y + 1.0) * 0.5;
+    const int SDF_SIZE = 64;
+    int ix = int(clamp(ux * float(SDF_SIZE), 0.0, float(SDF_SIZE - 1)));
+    int iy = int(clamp(uy * float(SDF_SIZE), 0.0, float(SDF_SIZE - 1)));
+    return sdf_data[iy * SDF_SIZE + ix];
 }
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
@@ -128,6 +157,23 @@ void main() {
                     density += spiky_pow2(dist);
                     near_density += spiky_pow3(dist);
                 }
+            }
+        }
+    }
+
+    // Boundary density contribution via SDF (Akinci 2012 adaptation)
+    // Body surface acts as a "virtual wall" of boundary particles,
+    // contributing density to nearby fluid particles.
+    if (body_enabled != 0) {
+        vec2 localPos = rotate2d(my_pos - body_pos, -body_angle);
+        if (abs(localPos.x) < sdf_half_extents.x && abs(localPos.y) < sdf_half_extents.y) {
+            float d = sampleSdf(localPos);
+            // Contribute within kernel radius of surface (both outside AND inside body)
+            if (d > -smoothing_radius && d < smoothing_radius) {
+                float dist = abs(d); // distance to surface
+                float bv = target_density * boundary_volume;
+                density += bv * spiky_pow2(dist);
+                near_density += bv * spiky_pow3(dist);
             }
         }
     }
