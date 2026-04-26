@@ -37,18 +37,18 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int mouse_pressed;
     vec2 ground_offset;
     int spray_mode;
-    float _pad_sp0;
-    float _pad_sp1;
-    float _pad_sp2;
-    float _pad_sp3;
-    float _pad_sp4;
+    int sim_mode;
+    float gas_stiffness;
+    float buoyancy_alpha;
+    float vorticity_epsilon;
+    float temp_diffusion_rate;
     int body_count;
-    float _pad_sp5;
-    float _pad_sp6;
-    float _pad_sp7;
-    float _pad_sp8;
+    float particle_lifetime;
+    float ambient_temperature;
+    float cooling_rate;
+    float gas_viscosity_ratio;
     float fluid_particle_mass;
-    float _pad_sp9;
+    float _pad9;
     float target_density;
 };
 

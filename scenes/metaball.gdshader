@@ -33,6 +33,7 @@ uniform float time = 0.0;
 uniform float spec_strength = 0.5;
 uniform float toon_levels = 0.0;  // 0=off (continuous gradient), >0=quantized levels
 
+uniform int sim_mode = 0;
 uniform int debug_mode = 0;
 
 // Hash constants (must match C# side)
@@ -115,8 +116,26 @@ void fragment() {
 
 	if (vel_weight_sum > 0.001) avg_vel /= vel_weight_sum;
 
-	// Heatmap debug
-	if (debug_mode == 1) {
+	// Smoke mode rendering
+	if (sim_mode == 1) {
+		float avg_temp = vel_weight_sum > 0.001 ? avg_vel.x : 0.0;
+		float temp_opacity = smoothstep(0.15, 0.55, avg_temp);
+		float smoke_alpha = smoothstep(0.2, 2.0, total) * 0.55 * temp_opacity;
+		// Temperature -> color: hot (bright orange) to cool (light gray)
+		vec3 hot_color  = vec3(1.0, 0.45, 0.05);
+		vec3 warm_color = vec3(1.0, 0.7, 0.3);
+		vec3 cool_color = vec3(0.7, 0.7, 0.7);
+		vec3 cold_color = vec3(0.92, 0.92, 0.93);
+		vec3 smoke_color;
+		if (avg_temp > 0.6) {
+			smoke_color = mix(warm_color, hot_color, (avg_temp - 0.6) / 0.4);
+		} else if (avg_temp > 0.25) {
+			smoke_color = mix(cool_color, warm_color, (avg_temp - 0.25) / 0.35);
+		} else {
+			smoke_color = mix(cold_color, cool_color, avg_temp / 0.25);
+		}
+		COLOR = vec4(smoke_color, smoke_alpha);
+	} else if (debug_mode == 1) {
 		float t = clamp(total / (body_threshold * 1.5), 0.0, 1.0);
 		vec3 heat;
 		if (t < 0.5) heat = mix(vec3(0.0, 0.0, 0.2), vec3(0.0, 1.0, 0.0), t * 2.0);

@@ -36,8 +36,10 @@ public class SphGpu
 	// Texture RIDs + Texture2Drd
 	private Rid position_tex_rid;
 	private Rid hashlookup_tex_rid;
+	private Rid smoke_tex_rid;
 	public Texture2Drd PositionTex { get; private set; }
 	public Texture2Drd HashLookupTex { get; private set; }
+	public Texture2Drd SmokeTex { get; private set; }
 
 	// Shader + Pipeline RIDs
 	private Rid shader_forces_hash;
@@ -75,7 +77,7 @@ public class SphGpu
 	private Rid uniform_set_output_1;
 
 	// Buffer sizes
-	private const int PARTICLE_BUF_SIZE = N * (8 + 8 + 8 + 4 + 4);
+	private const int PARTICLE_BUF_SIZE = N * (8 + 8 + 8 + 4 + 4 + 4 + 4);
 	private const int HASH_BUF_SIZE = N * (4 + 8);
 	private const int SORT_BUF_SIZE = N * (4 + 4);
 	private const int HASHTABLE_BUF_SIZE = N * (4 + 4);
@@ -126,6 +128,14 @@ public class SphGpu
 		PositionTex.TextureRdRid = position_tex_rid;
 		HashLookupTex = new Texture2Drd();
 		HashLookupTex.TextureRdRid = hashlookup_tex_rid;
+
+		var smokeFmt = new RDTextureFormat();
+		smokeFmt.Width = TEX_W; smokeFmt.Height = TEX_H;
+		smokeFmt.Format = RenderingDevice.DataFormat.R32Sfloat;
+		smokeFmt.UsageBits = RenderingDevice.TextureUsageBits.StorageBit | RenderingDevice.TextureUsageBits.SamplingBit;
+		smoke_tex_rid = RD.TextureCreate(smokeFmt, defaultView);
+		SmokeTex = new Texture2Drd();
+		SmokeTex.TextureRdRid = smoke_tex_rid;
 
 		force_accum_buf = RD.StorageBufferCreate(FORCE_ACCUM_SIZE, new byte[FORCE_ACCUM_SIZE]);
 		sdf_buf = RD.StorageBufferCreate(SDF_BUF_SIZE, new byte[SDF_BUF_SIZE]);
@@ -311,7 +321,11 @@ public class SphGpu
 		bool mousePressed, Vector2 mousePos,
 		float mouseRadiusGrab, float mouseRadiusStick, float grabSpeed,
 		Vector2 groundOffset, bool sprayMode,
-		float fluidParticleMass, float targetDensity, int bodyCount)
+		float fluidParticleMass, float targetDensity, int bodyCount,
+		float gasStiffness = 0f, float buoyancyAlpha = 0f, int simMode = 0,
+		float vorticityEpsilon = 0f, float tempDiffusionRate = 0f,
+		float particleLifetime = 0f, float ambientTemperature = 0f,
+		float coolingRate = 0f, float gasViscosityRatio = 0f)
 	{
 		byte[] data = new byte[PARAMS_BUF_SIZE];
 		int offset = 0;
@@ -338,18 +352,18 @@ public class SphGpu
 		WriteInt(data, ref offset, mousePressed ? 1 : 0);   // 92
 		WriteVec2(data, ref offset, groundOffset);           // 96
 		WriteInt(data, ref offset, sprayMode ? 1 : 0);      // 104
-		WriteFloat(data, ref offset, 0f);                    // 108 padding (was boundaryVolume)
-		WriteFloat(data, ref offset, 0f);                    // 112 padding
-		WriteFloat(data, ref offset, 0f);                    // 116 padding
-		WriteFloat(data, ref offset, 0f);                    // 120 padding
-		WriteFloat(data, ref offset, 0f);                    // 124 padding
+		WriteInt(data, ref offset, simMode);                 // 108
+		WriteFloat(data, ref offset, gasStiffness);          // 112
+		WriteFloat(data, ref offset, buoyancyAlpha);         // 116
+		WriteFloat(data, ref offset, vorticityEpsilon);      // 120
+		WriteFloat(data, ref offset, tempDiffusionRate);     // 124
 		WriteInt(data, ref offset, bodyCount);               // 128
-		WriteFloat(data, ref offset, 0f);                    // 132 padding
-		WriteFloat(data, ref offset, 0f);                    // 136 padding
-		WriteFloat(data, ref offset, 0f);                    // 140 padding
-		WriteFloat(data, ref offset, 0f);                    // 144 padding
+		WriteFloat(data, ref offset, particleLifetime);       // 132
+		WriteFloat(data, ref offset, ambientTemperature);     // 136
+		WriteFloat(data, ref offset, coolingRate);            // 140
+		WriteFloat(data, ref offset, gasViscosityRatio);      // 144
 		WriteFloat(data, ref offset, fluidParticleMass);     // 148
-		WriteFloat(data, ref offset, 0f);                    // 152 padding (was sdfShapeRadius)
+		WriteFloat(data, ref offset, 0f);                    // 152 padding
 		WriteFloat(data, ref offset, targetDensity);          // 156
 		// Total: 160 bytes
 		RD.BufferUpdate(params_ubuf, 0, PARAMS_BUF_SIZE, data);
@@ -440,8 +454,8 @@ public class SphGpu
 			posVelData[voff + 4] = vyb[0]; posVelData[voff + 5] = vyb[1]; posVelData[voff + 6] = vyb[2]; posVelData[voff + 7] = vyb[3];
 		}
 		RD.BufferUpdate(particle_buf, 0, N * 16, posVelData);
-		RD.BufferClear(particle_buf, N * 16, N * 8);
-		RD.BufferClear(particle_buf, N * 24, N * 8);
+		RD.BufferClear(particle_buf, (uint)(N * 16), (uint)(N * 16));
+		RD.BufferClear(particle_buf, (uint)(N * 32), (uint)(N * 8));
 	}
 
 	public byte[] ReadBackParticleBuffer()
@@ -503,9 +517,29 @@ public class SphGpu
 		RD.BufferUpdate(particle_buf, (uint)(N * 8 + startIndex * 8), (uint)velData.Length, velData);
 	}
 
+	public void UpdateParticlesBatchWithTemp(int startIndex, Vector2[] positions, Vector2[] velocities, float[] temperatures, int count)
+	{
+		byte[] posData = new byte[count * 8], velData = new byte[count * 8], tempData = new byte[count * 4];
+		for (int i = 0; i < count; i++)
+		{
+			int idx = startIndex + i, off = i * 8, toff = i * 4;
+			byte[] xb = BitConverter.GetBytes(positions[idx].X), yb = BitConverter.GetBytes(positions[idx].Y);
+			posData[off + 0] = xb[0]; posData[off + 1] = xb[1]; posData[off + 2] = xb[2]; posData[off + 3] = xb[3];
+			posData[off + 4] = yb[0]; posData[off + 5] = yb[1]; posData[off + 6] = yb[2]; posData[off + 7] = yb[3];
+			byte[] vxb = BitConverter.GetBytes(velocities[idx].X), vyb = BitConverter.GetBytes(velocities[idx].Y);
+			velData[off + 0] = vxb[0]; velData[off + 1] = vxb[1]; velData[off + 2] = vxb[2]; velData[off + 3] = vxb[3];
+			velData[off + 4] = vyb[0]; velData[off + 5] = vyb[1]; velData[off + 6] = vyb[2]; velData[off + 7] = vyb[3];
+			byte[] tb = BitConverter.GetBytes(temperatures[idx]);
+			tempData[toff + 0] = tb[0]; tempData[toff + 1] = tb[1]; tempData[toff + 2] = tb[2]; tempData[toff + 3] = tb[3];
+		}
+		RD.BufferUpdate(particle_buf, (uint)(startIndex * 8), (uint)posData.Length, posData);
+		RD.BufferUpdate(particle_buf, (uint)(N * 8 + startIndex * 8), (uint)velData.Length, velData);
+		RD.BufferUpdate(particle_buf, (uint)(N * 32 + startIndex * 4), (uint)tempData.Length, tempData);
+	}
+
 	public void Free()
 	{
-		RD.FreeRid(position_tex_rid); RD.FreeRid(hashlookup_tex_rid);
+		RD.FreeRid(position_tex_rid); RD.FreeRid(hashlookup_tex_rid); RD.FreeRid(smoke_tex_rid);
 		RD.FreeRid(force_accum_buf); RD.FreeRid(sdf_buf); RD.FreeRid(body_data_buf);
 		RD.FreeRid(particle_buf); RD.FreeRid(hash_buf); RD.FreeRid(sort_buf);
 		RD.FreeRid(hashtable_buf); RD.FreeRid(histogram_buf); RD.FreeRid(prefix_buf);

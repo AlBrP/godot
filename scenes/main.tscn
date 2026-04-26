@@ -31,6 +31,7 @@ shader_parameter/water_spec = Vector3(1, 1, 1)
 shader_parameter/time = 0.0
 shader_parameter/spec_strength = 0.35
 shader_parameter/toon_levels = 0.0
+shader_parameter/sim_mode = 0
 shader_parameter/debug_mode = 0
 
 [sub_resource type="CircleShape2D" id="CircleShape2D_body"]

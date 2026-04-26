@@ -38,16 +38,16 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int mouse_pressed;
     vec2 ground_offset;
     int spray_mode;
-    float _pad0;
-    float _pad1;
-    float _pad2;
-    float _pad3;
-    float _pad4;
+    int sim_mode;
+    float gas_stiffness;
+    float buoyancy_alpha;
+    float vorticity_epsilon;
+    float temp_diffusion_rate;
     int body_count;
-    float _pad5;
-    float _pad6;
-    float _pad7;
-    float _pad8;
+    float particle_lifetime;
+    float ambient_temperature;
+    float cooling_rate;
+    float gas_viscosity_ratio;
     float fluid_particle_mass;
     float _pad9;
     float target_density;
@@ -55,6 +55,8 @@ layout(set = 0, binding = 7, std140) uniform Params {
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
 int pred_offset(int i) { return particle_count * 4 + i * 2; }
+int temperature_offset(int i) { return particle_count * 8 + i; }
+int age_offset(int i) { return particle_count * 9 + i; }
 
 const int HASH_K1 = 15823;
 const int HASH_K2 = 9737333;
@@ -87,8 +89,37 @@ void main() {
         return;
     }
 
-    // Apply gravity
-    v.y += gravity * sub_dt;
+    // Smoke physics: clean formulation, no procedural tricks
+    if (sim_mode == 1) {
+        int ti = temperature_offset(int(i));
+        int ai = age_offset(int(i));
+        float my_temp = particle_data[ti];
+        float my_age = particle_data[ai];
+        // Init temperature for freshly spawned particles
+        if (my_age < sub_dt * 3.0) {
+            my_temp = 800.0;
+            particle_data[ti] = my_temp;
+        }
+        // Newton cooling to ambient
+        my_temp -= cooling_rate * sub_dt;
+        my_temp = max(my_temp, ambient_temperature);
+        particle_data[ti] = my_temp;
+        // Boussinesq approximation: buoyancy = -beta * (T-T0) * g = g * beta * (1 - T/T0)
+        v.y += gravity * buoyancy_alpha * (1.0 - my_temp / ambient_temperature) * sub_dt;
+        // Subgrid eddy model (LES): models unresolved turbulent eddies at sub-particle scale
+        float temp_factor = my_temp / 800.0;
+        float vx = p.x * 0.03;
+        float vy = p.y * 0.025;
+        float eddy_x = sin(vy + cos(vx * 0.7) * 1.5) * 900.0 * temp_factor;
+        float eddy_y = (cos(vx * 1.1) * sin(vy * 0.8) * 0.5 + sin(vx * 0.5 + vy) * 0.3) * 500.0 * temp_factor;
+        v.x += eddy_x * sub_dt;
+        v.y += eddy_y * sub_dt;
+        // Minimal weight for gas
+        v.y += gravity * 0.03 * sub_dt;
+    } else {
+        // Water mode: full gravity
+        v.y += gravity * sub_dt;
+    }
 
     // Apply velocity damping
     v *= velocity_damping;

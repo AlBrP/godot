@@ -43,18 +43,18 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int mouse_pressed;
     vec2 ground_offset;
     int spray_mode;
-    float _pad_sp0;
-    float _pad_sp1;
-    float _pad_sp2;
-    float _pad_sp3;
-    float _pad_sp4;
+    int sim_mode;
+    float gas_stiffness;
+    float buoyancy_alpha;
+    float vorticity_epsilon;
+    float temp_diffusion_rate;
     int body_count;
-    float _pad_sp5;
-    float _pad_sp6;
-    float _pad_sp7;
-    float _pad_sp8;
+    float particle_lifetime;
+    float ambient_temperature;
+    float cooling_rate;
+    float gas_viscosity_ratio;
     float fluid_particle_mass;
-    float _pad_sp9;
+    float _pad9;
     float target_density;
 };
 
@@ -66,6 +66,8 @@ const int TEX_H = 70;
 const int TOTAL_PIXELS = TEX_W * TEX_H;
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
+int density_offset(int i) { return particle_count * 6 + i; }
+int temperature_offset(int i) { return particle_count * 8 + i; }
 
 void main() {
     uint j = gl_GlobalInvocationID.x;
@@ -81,7 +83,14 @@ void main() {
         vec2 v = vec2(particle_data[vi], particle_data[vi + 1]);
         float vn_x = clamp(v.x / max_vel * 0.5 + 0.5, 0.0, 1.0);
         float vn_y = clamp(v.y / max_vel * 0.5 + 0.5, 0.0, 1.0);
-        imageStore(position_tex, tex_coord, vec4(world_pos, vn_x, vn_y));
+        if (sim_mode == 1) {
+            float temp = particle_data[temperature_offset(int(pidx))];
+            float tn = clamp(temp / 1000.0, 0.0, 1.0);
+            float den = clamp(particle_data[density_offset(int(pidx))] * 10.0, 0.0, 1.0);
+            imageStore(position_tex, tex_coord, vec4(world_pos, tn + 0.5, den));
+        } else {
+            imageStore(position_tex, tex_coord, vec4(world_pos, vn_x, vn_y));
+        }
 
         int start = ht_start[int(j)];
         int end = ht_end[int(j)];

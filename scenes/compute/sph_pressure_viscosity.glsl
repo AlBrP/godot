@@ -73,16 +73,16 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int mouse_pressed;
     vec2 ground_offset;
     int spray_mode;
-    float _pad0;
-    float _pad1;
-    float _pad2;
-    float _pad3;
-    float _pad4;
+    int sim_mode;
+    float gas_stiffness;
+    float buoyancy_alpha;
+    float vorticity_epsilon;
+    float temp_diffusion_rate;
     int body_count;
-    float _pad5;
-    float _pad6;
-    float _pad7;
-    float _pad8;
+    float particle_lifetime;
+    float ambient_temperature;
+    float cooling_rate;
+    float gas_viscosity_ratio;
     float fluid_particle_mass;
     float _pad9;
     float target_density;
@@ -141,10 +141,12 @@ vec2 sampleSdfNormal(vec2 localPos, int bodyIdx) {
 }
 
 float pressure_from_density(float density) {
+    if (sim_mode == 1) return density * gas_stiffness;
     return (density - target_density) * pressure_multiplier;
 }
 
 float near_pressure_from_density(float near_density) {
+    if (sim_mode == 1) return near_density * gas_stiffness * 0.1;
     return near_pressure_multiplier * near_density;
 }
 
@@ -152,6 +154,7 @@ int vel_offset(int i) { return particle_count * 2 + i * 2; }
 int pred_offset(int i) { return particle_count * 4 + i * 2; }
 int density_offset(int i) { return particle_count * 6 + i; }
 int near_density_offset(int i) { return particle_count * 7 + i; }
+int temperature_offset(int i) { return particle_count * 8 + i; }
 
 const int HASH_K1 = 15823;
 const int HASH_K2 = 9737333;
@@ -178,14 +181,25 @@ void main() {
 
     float my_density = particle_data[density_offset(idxi)];
     float my_near_density = particle_data[near_density_offset(idxi)];
-    float my_pressure = pressure_from_density(my_density);
-    float my_near_pressure = near_pressure_from_density(my_near_density);
 
     int vi = vel_offset(idxi);
     vec2 my_vel = vec2(particle_data[vi], particle_data[vi + 1]);
+    float my_temp = sim_mode == 1 ? particle_data[temperature_offset(idxi)] : 0.0;
+
+    float my_pressure, my_near_pressure;
+    if (sim_mode == 1) {
+        float temp_ratio = my_temp / ambient_temperature;
+        my_pressure = my_density * gas_stiffness * temp_ratio;
+        my_near_pressure = my_near_density * gas_stiffness * 0.1 * temp_ratio;
+    } else {
+        my_pressure = pressure_from_density(my_density);
+        my_near_pressure = near_pressure_from_density(my_near_density);
+    }
 
     vec2 pressure_force = vec2(0.0);
     vec2 viscosity_force = vec2(0.0);
+    float temp_delta = 0.0;
+    float my_curl = 0.0;
 
     ivec2 my_cell = grid_cell_coord[idx];
     float sr_sq = smoothing_radius_sq;
@@ -210,8 +224,17 @@ void main() {
 
                 float nb_density = particle_data[density_offset(int(neighbor_idx))];
                 float nb_near_density = particle_data[near_density_offset(int(neighbor_idx))];
-                float nb_pressure = pressure_from_density(nb_density);
-                float nb_near_pressure = near_pressure_from_density(nb_near_density);
+                float nb_pressure, nb_near_pressure;
+                float nb_temp = 0.0;
+                if (sim_mode == 1) {
+                    nb_temp = particle_data[temperature_offset(int(neighbor_idx))];
+                    float nb_temp_ratio = nb_temp / ambient_temperature;
+                    nb_pressure = nb_density * gas_stiffness * nb_temp_ratio;
+                    nb_near_pressure = nb_near_density * gas_stiffness * 0.1 * nb_temp_ratio;
+                } else {
+                    nb_pressure = pressure_from_density(nb_density);
+                    nb_near_pressure = near_pressure_from_density(nb_near_density);
+                }
                 float shared_pressure = (my_pressure + nb_pressure) * 0.5;
                 float shared_near_pressure = (my_near_pressure + nb_near_pressure) * 0.5;
 
@@ -221,15 +244,36 @@ void main() {
                 int vn = vel_offset(int(neighbor_idx));
                 vec2 other_vel = vec2(particle_data[vn], particle_data[vn + 1]);
                 viscosity_force += (other_vel - my_vel) * poly6_kernel(dist);
+
+                if (sim_mode == 1) {
+                    temp_delta += (nb_temp - my_temp) * poly6_kernel(dist);
+                    float dvx = other_vel.x - my_vel.x;
+                    float dvy = other_vel.y - my_vel.y;
+                    float kernel_grad = spiky_pow2_derivative(dist);
+                    my_curl += (dvx * dir.y - dvy * dir.x) * kernel_grad / max(nb_density, 0.0001);
+                }
             }
         }
     }
 
     vec2 acceleration = pressure_force / my_density;
-    particle_data[vi] += acceleration.x * sub_dt + viscosity_force.x * viscosity_strength * sub_dt;
-    particle_data[vi + 1] += acceleration.y * sub_dt + viscosity_force.y * viscosity_strength * sub_dt;
+    float visc_mult = sim_mode == 1 ? gas_viscosity_ratio : 1.0;
+    particle_data[vi] += acceleration.x * sub_dt + viscosity_force.x * viscosity_strength * visc_mult * sub_dt;
+    particle_data[vi + 1] += acceleration.y * sub_dt + viscosity_force.y * viscosity_strength * visc_mult * sub_dt;
 
-    // Boundary pressure force — loop over all active bodies
+    // Vorticity confinement + temperature diffusion (smoke mode)
+    if (sim_mode == 1) {
+        particle_data[temperature_offset(idxi)] += temp_diffusion_rate * temp_delta * sub_dt;
+        float omega = abs(my_curl);
+        if (omega > 0.0001) {
+            vec2 n = normalize(my_vel + vec2(0.001));
+            vec2 vort_force = vec2(-n.y, n.x) * omega * vorticity_epsilon;
+            particle_data[vi] += vort_force.x * sub_dt;
+            particle_data[vi + 1] += vort_force.y * sub_dt;
+        }
+    }
+
+    // Boundary pressure force - loop over all active bodies
     for (int b = 0; b < body_count; b++) {
         if (bodies[b].enabled == 0) continue;
         vec2 localPos = rotate2d(my_pos - bodies[b].pos, -bodies[b].angle);

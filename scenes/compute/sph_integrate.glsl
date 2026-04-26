@@ -50,22 +50,23 @@ layout(set = 0, binding = 7, std140) uniform Params {
     int mouse_pressed;
     vec2 ground_offset;
     int spray_mode;
-    float _pad0;
-    float _pad1;
-    float _pad2;
-    float _pad3;
-    float _pad4;
+    int sim_mode;
+    float gas_stiffness;
+    float buoyancy_alpha;
+    float vorticity_epsilon;
+    float temp_diffusion_rate;
     int body_count;
-    float _pad5;
-    float _pad6;
-    float _pad7;
-    float _pad8;
+    float particle_lifetime;
+    float ambient_temperature;
+    float cooling_rate;
+    float gas_viscosity_ratio;
     float fluid_particle_mass;
     float _pad9;
     float target_density;
 };
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
+int age_offset(int i) { return particle_count * 9 + i; }
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -103,6 +104,19 @@ void main() {
     else if (p.x > bounds_max.x) { p.x = bounds_max.x; v.x *= -collision_damping; }
     if (p.y < bounds_min.y) { p.y = bounds_min.y; v.y *= -collision_damping; }
     else if (p.y > bounds_max.y) { p.y = bounds_max.y; v.y *= -collision_damping; }
+
+    // Smoke particle lifecycle
+    if (sim_mode == 1) {
+        int ai = age_offset(i);
+        particle_data[ai] += sub_dt;
+        if (particle_data[ai] > particle_lifetime) {
+            p.y = -600.0;
+            v = vec2(0.0);
+            particle_data[ai] = 0.0;
+            int ti = particle_count * 8 + i;
+            particle_data[ti] = 0.0;
+        }
+    }
 
     particle_data[i * 2] = p.x;
     particle_data[i * 2 + 1] = p.y;
