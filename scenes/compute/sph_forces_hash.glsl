@@ -133,13 +133,18 @@ void main() {
         float temp_factor = my_temp / init_temp;
         float eddy_x, eddy_y;
         if (sim_mode == 2) {
-            // Fire: tightened eddy
+            // Fire: reduced lateral spread for columnar flame shape
             float sway = p.y * 0.031;
             float pid = float(i) * 0.7;
-            eddy_x = sin(sway + pid) * 1100.0 * temp_factor;
-            eddy_x += cos(sway * 2.1 + pid * 1.3) * 360.0 * temp_factor;
-            eddy_y = cos(sway * 1.4 + pid * 0.6) * 240.0 * temp_factor;
-            eddy_y += sin(sway * 3.0 + pid) * 150.0 * temp_factor;
+            // Height-dependent lateral boost: sides peel off at top -> arched tip
+            float rise_h = clamp((mouse_pos.y - p.y) / 100.0, 0.0, 1.0);
+            float top_spread = 1.0 + rise_h * 2.5;  // 1x at base, 3.5x at top
+            // Lateral eddy: moderate spread for flame tongue formation
+            eddy_x = sin(sway + pid) * 1100.0 * temp_factor * top_spread;
+            eddy_x += cos(sway * 2.1 + pid * 1.3) * 360.0 * temp_factor * top_spread;
+            // Vertical eddy: slight upward turbulence (billow shape driver)
+            eddy_y = cos(sway * 1.4 + pid * 0.6) * 120.0 * temp_factor;
+            eddy_y += sin(sway * 3.0 + pid) * 60.0 * temp_factor;
         } else {
             // Smoke: original eddy model
             float phase = float(i) * 2.399 + p.x * 0.037 + p.y * 0.029;
@@ -152,6 +157,14 @@ void main() {
         }
         v.x += eddy_x * sub_dt;
         v.y += eddy_y * sub_dt;
+        // Mild column guidance: gentle centering only at mid-height where spread is worst
+        if (sim_mode == 2) {
+            float dx = p.x - mouse_pos.x;
+            float rise = mouse_pos.y - p.y;
+            // Only active in middle band (40-180px up), not near base or far tip
+            float guide_zone = smoothstep(20.0, 50.0, rise) * smoothstep(120.0, 90.0, rise);
+            v.x -= dx * 2.8 * guide_zone * temp_factor * sub_dt;
+        }
         // Body interaction: boundary layer drag + wake (physical, no trick)
         for (int b = 0; b < body_count; b++) {
             if (bodies[b].enabled == 0) continue;

@@ -269,8 +269,8 @@ void main() {
         float omega = abs(my_curl);
         if (omega > 0.0001) {
             vec2 n = normalize(my_vel + vec2(0.001));
-            // Fire: stronger vorticity for S-shaped flame billows
-            float vort_str = vorticity_epsilon * (sim_mode == 2 ? 1.6 : 1.0);
+            // Fire: moderate vorticity (reduced from 1.6 to keep column shape)
+            float vort_str = vorticity_epsilon * (sim_mode == 2 ? 1.0 : 1.0);
             vec2 vort_force = vec2(-n.y, n.x) * omega * vort_str;
             particle_data[vi] += vort_force.x * sub_dt;
             particle_data[vi + 1] += vort_force.y * sub_dt;

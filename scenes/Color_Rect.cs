@@ -64,6 +64,7 @@ public partial class Color_Rect : ColorRect
 		shaderMaterial.SetShaderParameter("field_scale", (double)ground_.field_scale);
 		shaderMaterial.SetShaderParameter("spec_strength", (double)ground_.spec_strength);
 		shaderMaterial.SetShaderParameter("toon_levels", (double)ground_.toon_levels);
+		shaderMaterial.SetShaderParameter("color_band", (double)ground_.color_band);
 		shaderMaterial.SetShaderParameter("time", Time.GetTicksMsec() / 1000.0f);
 
 		var vpSize = ground_.GetViewportRect().Size;

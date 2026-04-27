@@ -31,6 +31,7 @@ shader_parameter/water_spec = Vector3(1, 1, 1)
 shader_parameter/time = 0.0
 shader_parameter/spec_strength = 0.35
 shader_parameter/toon_levels = 0.0
+shader_parameter/color_band = 1.0
 shader_parameter/sim_mode = 0
 shader_parameter/debug_mode = 0
 

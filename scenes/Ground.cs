@@ -25,6 +25,7 @@ public partial class Ground : StaticBody2D
 	[Export] public float edge_sharpness { get; set; } = 0.78f;
 	[Export] public float spec_strength { get; set; } = 0.5f;
 	[Export] public float toon_levels { get; set; } = 0f;
+	[Export] public float color_band { get; set; } = 2.2f;
 
 	// Slider panel
 	private bool show_sliders_ = false;
@@ -32,8 +33,8 @@ public partial class Ground : StaticBody2D
 	private int debug_mode_ = 0;
 	public int DebugModeVal => debug_mode_;
 	private Panel slider_panel_;
-	private HSlider toon_slider_, spec_slider_;
-	private Label toon_label_, spec_label_;
+	private HSlider toon_slider_, spec_slider_, band_slider_;
+	private Label toon_label_, spec_label_, band_label_;
 
 	// Particles
 	public const int ball_nums_ = 5000;
@@ -182,7 +183,7 @@ public partial class Ground : StaticBody2D
 	{
 		slider_panel_ = new Panel();
 		slider_panel_.Position = new Vector2(10, 10);
-		slider_panel_.Size = new Vector2(220, 100);
+		slider_panel_.Size = new Vector2(220, 150);
 		slider_panel_.Visible = false;
 		slider_panel_.Modulate = new Color(1, 1, 1, 0.85f);
 
@@ -213,6 +214,20 @@ public partial class Ground : StaticBody2D
 		spec_slider_.Value = spec_strength;
 		spec_slider_.ValueChanged += (double val) => { spec_strength = (float)val; };
 		slider_panel_.AddChild(spec_slider_);
+
+		band_label_ = new Label();
+		band_label_.Position = new Vector2(10, 80);
+		band_label_.Text = "ColorBand: 1.50";
+		band_label_.AddThemeFontSizeOverride("font_size", 14);
+		slider_panel_.AddChild(band_label_);
+
+		band_slider_ = new HSlider();
+		band_slider_.Position = new Vector2(10, 104);
+		band_slider_.Size = new Vector2(200, 20);
+		band_slider_.MinValue = 0.5; band_slider_.MaxValue = 4.0; band_slider_.Step = 0.1;
+		band_slider_.Value = color_band;
+		band_slider_.ValueChanged += (double val) => { color_band = (float)val; };
+		slider_panel_.AddChild(band_slider_);
 
 		AddChild(slider_panel_);
 	}
@@ -362,7 +377,7 @@ public partial class Ground : StaticBody2D
 		QueueRedraw();
 
 		if (slider_panel_ != null && slider_panel_.Visible)
-		{ toon_label_.Text = $"Toon Levels: {toon_levels:0}"; spec_label_.Text = $"Spec: {spec_strength:0.00}"; }
+		{ toon_label_.Text = $"Toon Levels: {toon_levels:0}"; spec_label_.Text = $"Spec: {spec_strength:0.00}"; band_label_.Text = $"ColorBand: {color_band:0.2}"; }
 
 		if (!paused_)
 		{
@@ -402,8 +417,8 @@ public partial class Ground : StaticBody2D
 				{
 					int idx = spawn_index_ % ball_nums_;
 					spawn_index_++;
-					float angle = -Mathf.Pi * 0.5f + (float)GD.RandRange(-Mathf.Pi * 0.06f, Mathf.Pi * 0.06f);
-					float speed = (float)GD.RandRange(13f, 45f) * jet_vscale[j];
+					float angle = -Mathf.Pi * 0.5f + (float)GD.RandRange(-Mathf.Pi * 0.18f, Mathf.Pi * 0.18f);
+					float speed = (float)GD.RandRange(6f, 28f) * jet_vscale[j];
 					var vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
 					vel_[idx] = vel;
 					var spawnOffset = new Vector2(offset_x + (float)(GD.Randf() - 0.5) * 4f, 40f + (float)(GD.Randf() - 0.5) * 4f);

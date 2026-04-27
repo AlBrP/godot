@@ -31,7 +31,8 @@ uniform vec3 water_spec      = vec3(1.00, 1.00, 1.00);
 uniform float time = 0.0;
 
 uniform float spec_strength = 0.5;
-uniform float toon_levels = 0.0;  // 0=off (continuous gradient), >0=quantized levels
+uniform float toon_levels = 0.0;
+uniform float color_band = 2.2;     // >1 pushes bands inward (less yellow), <1 spreads out (more yellow) // 0=off (continuous gradient), >0=quantized levels
 
 uniform int sim_mode = 0;
 uniform int debug_mode = 0;
@@ -154,9 +155,9 @@ void fragment() {
 		float flame_cy = vel_weight_sum > 0.001 ? (sum_pos_y / vel_weight_sum) : worldPos.y;
 		float mean_vx = vel_weight_sum > 0.001 ? (avg_vx / vel_weight_sum) : 0.0;
 
-		// Flame scale from particle density (grows with mass)
-		float mass_norm = clamp(total / 350.0, 0.3, 2.0);
-		float flame_h = 240.0 * pow(mass_norm, 0.28);
+		// Flame scale: nearly constant (not per-pixel!) to avoid shape following particle cone
+		float mass_norm = 0.82 + 0.18 * smoothstep(8.0, 60.0, total); // narrow range: 0.82~1.0
+		float flame_h = 260.0 * pow(mass_norm, 0.25); // ~255~265: almost fixed height
 		float flame_hw = flame_h * 0.15;
 
 		// Local Y: 0=base, positive going upward (Godot Y increases downward)
@@ -168,53 +169,146 @@ void fragment() {
 		float wind = mean_vx * 0.0002;
 		float flame_axis_x = flame_cx + wind * (1.0 + ny * 0.6);
 
-		// ---- Main flame body (narrow central column) ----
-		float main_w = flame_hw * 0.35 * mix(1.0, 0.04, smoothstep(0.0, 0.9, ny));
-		float main_dist = abs((worldPos.x - flame_axis_x) / max(main_w, 0.3));
+		// Edge noise: subtle jitter on tongue edges only (not main body)
+		float edge_noise = fract(sin(dot(worldPos.xy * 0.08 + ft * 2.0, vec2(12.9898, 78.233))) * 43758.5453);
+		edge_noise = mix(0.95, 1.05, edge_noise);
+
+		// Main body width: solid pillar, no holes
+		float main_w = flame_hw * 0.55 * mix(1.0, 0.08, smoothstep(0.0, 1.05, ny));
+
+		// ---- Main flame body (wide central pillar) ----
+		float main_dist = abs((worldPos.x - flame_axis_x) / max(main_w, 0.5));
 		float main_core = 1.0 - main_dist * main_dist;
 		float main_edge = smoothstep(1.0, 0.0, main_dist);
 		float main_shape = max(0.0, main_core) * main_edge;
-		float main_ve = smoothstep(-0.03, 0.05, ny) * (1.0 - smoothstep(0.55, 0.95, ny));
+		float main_ve = smoothstep(-0.04, 0.07, ny) * (1.0 - smoothstep(0.72, 1.10, ny));
 		float main_body = main_shape * main_ve;
 
-		// ---- Side tongues (4 detached small flames) ----
+		// ---- Side tongues (3 medium + 2 small embers + 3 tip tongues) ----
 		float side_field = 0.0;
 
-		for (int ti = 0; ti < 4; ti++) {
-			float sign_side[4] = float[4](-1.0, -1.0, 1.0, 1.0);
-			float offset_x[4] = float[4](0.60, 0.40, 0.40, 0.60);
-			float s_hfrac[4]  = float[4](0.22, 0.42, 0.40, 0.20);
-			float s_sway[4]   = float[4](10.0, 5.0, 6.0, 11.0);
-			float s_sfreq[4]  = float[4](0.040, 0.032, 0.030, 0.042);
-			float s_phase[4]  = float[4](1.2, 0.5, 0.7, 1.4);
-			float s_tpow[4]   = float[4](2.2, 2.8, 2.9, 2.1);
-			float s_bw[4]     = float[4](0.06, 0.08, 0.07, 0.05);
+		// Medium tongues: taller, wider, more visible
+		for (int ti = 0; ti < 3; ti++) {
+			float sign_side[3] = float[3](-1.0, 1.0, -1.0);
+			float offset_x[3] = float[3](0.62, 0.56, 0.74);
+			float s_hfrac[3]  = float[3](0.72, 0.78, 0.60);
+			float s_sway[3]   = float[3](18.0, 15.0, 13.0);
+			float s_sfreq[3]  = float[3](0.038, 0.034, 0.042);
+			float s_phase[3]  = float[3](1.1, 0.6, 1.7);
+			float s_tpow[3]   = float[3](1.7, 1.9, 2.1);
+			float s_bw[3]     = float[3](0.14, 0.13, 0.11);
 
 			float th = flame_h * s_hfrac[ti];
 			float ty = local_y / max(th, 1.0);
-			if (ty < -0.04 || ty > 1.06) continue;
+			if (ty < -0.04 || ty > 1.08) continue;
 
-			float time_i = ft * (1.0 + float(ti) * 0.15);
+			float time_i = ft * (1.0 + float(ti) * 0.12);
 			float sw = sin(local_y * s_sfreq[ti] + time_i + s_phase[ti]) * s_sway[ti];
-			sw += sin(local_y * s_sfreq[ti] * 2.3 + time_i * 1.5 + s_phase[ti] * 1.5) * s_sway[ti] * 0.25;
-			float cx = flame_axis_x + sign_side[ti] * offset_x[ti] * flame_hw + sw;
+			sw += sin(local_y * s_sfreq[ti] * 2.1 + time_i * 1.4 + s_phase[ti] * 1.3) * s_sway[ti] * 0.25;
+			float cx = flame_axis_x + sign_side[ti] * offset_x[ti] * flame_hw * edge_noise + sw;
 
-			float bw = s_bw[ti] * flame_hw * (0.75 + mass_norm * 0.25);
-			float width = bw * pow(max(0.004, 1.0 - ty), s_tpow[ti]);
+			float bw = s_bw[ti] * flame_hw * (0.80 + mass_norm * 0.20) * edge_noise;
+			float width = bw * pow(max(0.005, 1.0 - ty), s_tpow[ti]);
+
+			float dist = abs(worldPos.x - cx);
+			float dn = dist / max(width, 0.002);
+			if (dn >= 1.0) continue;
+
+			float cs = (1.0 - dn * dn) * smoothstep(1.0, 0.0, dn);
+			float ve = smoothstep(-0.04, 0.07, ty) * (1.0 - smoothstep(0.82, 1.08, ty));
+			side_field = max(side_field, cs * ve);
+		}
+
+		// Small ember tongues (detached sparks)
+		for (int ei = 0; ei < 2; ei++) {
+			float e_sign[2]    = float[2](1.0, -1.0);
+			float e_ox[2]      = float[2](0.34, 0.42);
+			float e_hf[2]      = float[2](0.24, 0.18);
+			float e_yoff[2]    = float[2](0.54, 0.70);
+			float e_sw[2]      = float[2](7.0, 5.0);
+			float e_sf[2]      = float[2](0.058, 0.070);
+			float e_ph[2]      = float[2](2.2, 0.8);
+
+			float th = flame_h * e_hf[ei];
+			float y_start = flame_h * e_yoff[ei];
+			float ty = (local_y - y_start) / max(th, 1.0);
+			if (ty < -0.05 || ty > 1.06) continue;
+
+			float time_i = ft * (1.3 + float(ei) * 0.2);
+			float sw = sin(local_y * e_sf[ei] + time_i + e_ph[ei]) * e_sw[ei];
+			sw += sin(local_y * e_sf[ei] * 2.5 + time_i * 1.8) * e_sw[ei] * 0.30;
+			float cx = flame_axis_x + e_sign[ei] * e_ox[ei] * flame_hw * edge_noise + sw;
+
+			float bw = 0.042 * flame_hw * (0.85 + mass_norm * 0.15) * edge_noise;
+			float width = bw * pow(max(0.006, 1.0 - ty), 2.4);
 
 			float dist = abs(worldPos.x - cx);
 			float dn = dist / max(width, 0.001);
 			if (dn >= 1.0) continue;
 
-			float cs = (1.0 - dn * dn) * smoothstep(1.0, 0.0, dn);
-			float ve = smoothstep(-0.04, 0.05, ty) * (1.0 - smoothstep(0.72, 1.06, ty));
-			side_field = max(side_field, cs * ve);
+			float cs = (1.0 - dn * dn * 0.7) * smoothstep(1.0, 0.0, dn);
+			float ve = smoothstep(-0.02, 0.09, ty) * (1.0 - smoothstep(0.86, 1.06, ty));
+			side_field = max(side_field, cs * ve * 0.7);
 		}
 
-		// ---- Composite: main body dominates, side tongues add flank detail ----
-		float shape_field = max(main_body * 1.1, side_field * 0.75);
+		// Tip tongues: tall, thin, reach above all others -> arched crown
+		for (int tpi = 0; tpi < 3; tpi++) {
+			float tp_sign[3] = float[3](1.0, -1.0, 1.0);
+			float tp_ox[3]   = float[3](0.08, 0.12, 0.30);
+			float tp_hf[3]   = float[3](0.38, 0.32, 0.26);
+			float tp_yoff[3] = float[3](0.58, 0.64, 0.70);
+			float tp_sw[3]   = float[3](9.0, 8.0, 6.0);
+			float tp_sf[3]   = float[3](0.044, 0.050, 0.056);
+			float tp_ph[3]   = float[3](0.3, 1.8, 3.1);
+			float tp_bw[3]   = float[3](0.055, 0.048, 0.040);
+			float tp_tp[3]   = float[3](2.0, 2.2, 2.5);
 
-		// Particle density: near-binary gate (eliminate contour lines)
+			float th = flame_h * tp_hf[tpi];
+			float y_start = flame_h * tp_yoff[tpi];
+			float ty = (local_y - y_start) / max(th, 1.0);
+			if (ty < -0.06 || ty > 1.10) continue;
+
+			float time_i = ft * (1.6 + float(tpi) * 0.18);
+			float sw = sin(local_y * tp_sf[tpi] + time_i + tp_ph[tpi]) * tp_sw[tpi];
+			sw += sin(local_y * tp_sf[tpi] * 2.3 + time_i * 1.6) * tp_sw[tpi] * 0.35;
+			float cx = flame_axis_x + tp_sign[tpi] * tp_ox[tpi] * flame_hw * edge_noise + sw;
+
+			float bw = tp_bw[tpi] * flame_hw * edge_noise;
+			float width = bw * pow(max(0.004, 1.0 - ty), tp_tp[tpi]);
+
+			float dist = abs(worldPos.x - cx);
+			float dn = dist / max(width, 0.0005);
+			if (dn >= 1.0) continue;
+
+			float cs = (1.0 - dn * dn * 0.8) * smoothstep(1.0, 0.0, dn);
+			float ve = smoothstep(-0.03, 0.08, ty) * (1.0 - smoothstep(0.90, 1.10, ty));
+			side_field = max(side_field, cs * ve * 0.85);
+		}
+
+		// ---- Solid ellipse base (fills all interior holes) ----
+		float sbx = abs(worldPos.x - flame_axis_x) / max(flame_hw * 0.55, 1.0);
+		float sby = ny;
+		float ellipse_w = mix(1.0, 0.20, smoothstep(0.0, 1.0, sby));
+		float solid_base = (1.0 - sbx * sbx / max(ellipse_w * ellipse_w, 0.01))
+		                  * smoothstep(-0.05, 0.08, sby)
+		                  * (1.0 - smoothstep(0.92, 1.12, sby));
+		solid_base = max(solid_base, 0.0) * 0.6;
+
+		// ---- Composite: tongues on top of solid base ----
+		float shape_field = max(main_body * 1.05, side_field * 0.90);
+		shape_field = max(shape_field, solid_base);
+
+		// Concave arc base
+		float base_arc = 0.0;
+		if (ny > -0.08 && ny < 0.18) {
+			float bny = (ny + 0.08) / 0.26;
+			float bx = abs(worldPos.x - flame_axis_x) / max(flame_hw * 0.50, 1.0);
+			float b_curve = bx * bx * (1.8 - 0.9 * bny);
+			base_arc = (1.0 - b_curve) * smoothstep(0.0, 1.0, bny) * smoothstep(1.0, 0.7, bny);
+		}
+		shape_field = max(shape_field, base_arc * 0.7);
+
+		// Particle density gate (same as original)
 		float density_gate = smoothstep(0.01, 0.12, total * 0.01);
 		float flame_field = shape_field * density_gate;
 
@@ -232,42 +326,60 @@ void fragment() {
 			else heat = mix(vec3(1.0, 0.5, 0.0), vec3(1.0, 1.0, 1.0), (t - 0.75) / 0.25);
 			COLOR = vec4(heat, 0.9);
 		} else {
-			vec3 core_yellow  = vec3(1.0, 0.97, 0.38);
-			vec3 inner_gold   = vec3(1.0, 0.82, 0.12);
-			vec3 mid_orange   = vec3(1.0, 0.60, 0.06);
-			vec3 outer_orange = vec3(0.96, 0.42, 0.06);
-			vec3 tip_red      = vec3(0.88, 0.28, 0.08);
+			// Colors matching cartoon ref: yellow core -> orange body -> red tips
+			vec3 hot_white   = vec3(1.0, 1.0, 0.65);
+			vec3 core_yellow = vec3(1.0, 0.92, 0.16);
+			vec3 inner_gold  = vec3(1.0, 0.68, 0.04);
+			vec3 body_orange = vec3(1.0, 0.48, 0.02);
+			vec3 edge_orange = vec3(0.92, 0.30, 0.04);
+			vec3 tip_red     = vec3(0.72, 0.12, 0.02);
 
-			// Radial temp gradient: center=hot(yellow), edge=cool(red), base=hot, tip=cool
-			float dist_from_axis = abs(worldPos.x - flame_axis_x) / max(flame_hw * 0.55, 1.0);
-			float coreness = (1.0 - ny) * (1.0 - clamp(dist_from_axis, 0.0, 1.0));
+			// Gradient: product keeps yellow only at bottom-center
+			float dist_from_axis = abs(worldPos.x - flame_axis_x) / max(flame_hw * 0.52, 1.0);
+			float height_cool = smoothstep(0.0, 1.0, ny);
+			float radial_cool = smoothstep(0.0, 1.0, dist_from_axis * 1.7);
+			float coreness = (1.0 - height_cool * 0.88) * (1.0 - radial_cool * 0.82);
 			float color_t = clamp(coreness, 0.0, 1.0);
+			if (color_band > 1.01 || color_band < 0.99)
+				color_t = pow(color_t, color_band);
 
 			vec3 flame_color;
 			if (toon_levels > 0.5) {
-				int band = int(floor(color_t * 5.0));
-				if (band >= 4)       flame_color = core_yellow;
+				int band = int(floor(color_t * 6.0));
+				if (band >= 5)       flame_color = hot_white;
+				else if (band == 4)  flame_color = core_yellow;
 				else if (band == 3)  flame_color = inner_gold;
-				else if (band == 2)  flame_color = mid_orange;
-				else if (band == 1)  flame_color = outer_orange;
+				else if (band == 2)  flame_color = body_orange;
+				else if (band == 1)  flame_color = edge_orange;
 				else                 flame_color = tip_red;
 			} else {
-				if (color_t > 0.80)       flame_color = mix(inner_gold,   core_yellow,   (color_t - 0.80) / 0.20);
-				else if (color_t > 0.58)  flame_color = mix(mid_orange,   inner_gold,    (color_t - 0.58) / 0.22);
-				else if (color_t > 0.34)  flame_color = mix(outer_orange, mid_orange,    (color_t - 0.34) / 0.24);
-				else if (color_t > 0.14)  flame_color = mix(tip_red,      outer_orange,  (color_t - 0.14) / 0.20);
+				if (color_t > 0.90)       flame_color = mix(core_yellow, hot_white,    (color_t - 0.90) / 0.10);
+				else if (color_t > 0.70)  flame_color = mix(inner_gold,  core_yellow,   (color_t - 0.70) / 0.20);
+				else if (color_t > 0.46)  flame_color = mix(body_orange, inner_gold,    (color_t - 0.46) / 0.24);
+				else if (color_t > 0.24)  flame_color = mix(edge_orange, body_orange,   (color_t - 0.24) / 0.22);
+				else if (color_t > 0.08)  flame_color = mix(tip_red,     edge_orange,    (color_t - 0.08) / 0.16);
 				else                      flame_color = tip_red;
 			}
 
-			// Cartoon outline
-			float field_grad = fwidth(flame_field);
-			float is_outline = smoothstep(0.003, 0.014, field_grad) *
-			                   smoothstep(0.3, 1.0, flame_field) *
-			                   (1.0 - smoothstep(3.0, 6.0, flame_field));
-			vec3 stroke_color = vec3(0.5, 0.10, 0.02);
-			flame_color = mix(flame_color, stroke_color, is_outline * 0.20);
+			// Inner glow: subtle bright spot at bottom-center
+			float glow_r = dist_from_axis + ny * 0.8;
+			float inner_glow = exp(-glow_r * glow_r * 5.0) * 0.14;
+			flame_color = mix(flame_color, core_yellow, inner_glow * smoothstep(0.25, 0.85, flame_field));
 
-			float flame_alpha = 0.4 + in_flame * 0.55;
+			// Cartoon outline: only at real edges, NOT inside
+			float field_grad = fwidth(flame_field);
+			float is_outline = smoothstep(0.003, 0.015, field_grad) *
+			                   smoothstep(0.15, 0.5, flame_field) *
+			                   (1.0 - smoothstep(2.5, 4.5, flame_field));
+			// Suppress internal strokes: kill outline where solid_base is strong
+			float interior_mask = 1.0 - smoothstep(0.25, 0.6, solid_base);
+			is_outline *= interior_mask;
+			float edge_sel = 1.0 - smoothstep(0.4, 1.8, shape_field);
+			is_outline *= (0.55 + edge_sel * 0.45);
+			vec3 stroke_color = vec3(0.38, 0.07, 0.01);
+			flame_color = mix(flame_color, stroke_color, is_outline * 0.42);
+
+			float flame_alpha = 0.45 + in_flame * 0.52;
 			COLOR = vec4(flame_color, flame_alpha);
 		}
 	} else if (sim_mode == 1) {
