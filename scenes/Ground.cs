@@ -29,6 +29,8 @@ public partial class Ground : StaticBody2D
 	// Slider panel
 	private bool show_sliders_ = false;
 	private bool debug_sprites_ = false;
+	private int debug_mode_ = 0;
+	public int DebugModeVal => debug_mode_;
 	private Panel slider_panel_;
 	private HSlider toon_slider_, spec_slider_;
 	private Label toon_label_, spec_label_;
@@ -87,8 +89,12 @@ public partial class Ground : StaticBody2D
 	[Export] public float particle_lifetime { get; set; } = 2.5f;
 	[Export] public float cooling_rate { get; set; } = 180.0f;
 	[Export] public float gas_viscosity_ratio { get; set; } = 0.1f;
+	[Export] public float body_drag_gas { get; set; } = 0.3f;
 	private bool smoke_mode_ = false;
+	private bool fire_mode_ = false;
 	public bool SmokeMode => smoke_mode_;
+	public bool FireMode => fire_mode_;
+	[Export] public float fire_temperature { get; set; } = 1500f;
 	private float[] smoke_temp_ = new float[ball_nums_];
 
 	private int body_count_ = 0;
@@ -305,7 +311,7 @@ public partial class Ground : StaticBody2D
 		float ox = vs.X / 2, oy = vs.Y * 0.3f;
 		for (int i = 0; i < ball_nums_; i++)
 		{
-			if (spray_mode_ || smoke_mode_)
+			if (spray_mode_ || smoke_mode_ || fire_mode_)
 			{
 				pos_[i] = new Vector2(-1000f, -1000f); vel_[i] = Vector2.Zero;
 				smoke_temp_[i] = 0f;
@@ -360,37 +366,7 @@ public partial class Ground : StaticBody2D
 
 		if (!paused_)
 		{
-			if (smoke_mode_ && mouse_pressed_)
-			{
-				int burst = 12;
-				float initTemp = 800f;
-				for (int s = 0; s < burst && spawn_index_ < ball_nums_; s++, spawn_index_++)
-				{
-					float angle = (float)GD.RandRange(-Mathf.Pi * 0.35, -Mathf.Pi * 0.02);
-					float speed = (float)GD.RandRange(100f, 400f);
-					var vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
-					vel_[spawn_index_] = vel;
-					pos_[spawn_index_] = mouse_position_ + new Vector2(
-						(float)(GD.Randf() - 0.5) * 50f,
-						(float)(GD.Randf() - 0.5) * 30f
-					);
-					smoke_temp_[spawn_index_] = initTemp;
-				}
-			}
-			else if (spray_mode_ && mouse_pressed_)
-			{
-				int spawn_count = 8;
-				for (int s = 0; s < spawn_count && spawn_index_ < ball_nums_; s++, spawn_index_++)
-				{
-					float angle = (float)GD.RandRange(-Mathf.Pi * 0.252, -Mathf.Pi * 0.238);
-					float speed = (float)GD.RandRange(2000f, 2100f);
-					var vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
-					vel_[spawn_index_] = vel;
-					float along = (float)GD.RandRange(50f, 110f);
-					pos_[spawn_index_] = mouse_position_ + vel.Normalized() * along;
-				}
-			}
-			else if (!spray_mode_ && !smoke_mode_ && mouse_pressed_)
+			if (!spray_mode_ && !smoke_mode_ && !fire_mode_ && mouse_pressed_)
 			{
 				float rg = 120f, rs = 30f, gs = 1500f;
 				for (int i = 0; i < ball_nums_; i++)
@@ -411,6 +387,66 @@ public partial class Ground : StaticBody2D
 	{
 		if (paused_) return;
 
+		// Spawn particles at fixed physics rate (60Hz, independent of render FPS)
+		if (fire_mode_ && mouse_pressed_)
+		{
+			int num_jets = 3;
+			float jet_spacing = 14f;
+			int per_jet = 4;
+			float[] jet_temp = { 1450f, 1550f, 1450f };
+			float[] jet_vscale = { 0.9f, 1.0f, 0.9f };
+			for (int j = 0; j < num_jets; j++)
+			{
+				float offset_x = (j - 1) * jet_spacing;
+				for (int s = 0; s < per_jet; s++)
+				{
+					int idx = spawn_index_ % ball_nums_;
+					spawn_index_++;
+					float angle = -Mathf.Pi * 0.5f + (float)GD.RandRange(-Mathf.Pi * 0.06f, Mathf.Pi * 0.06f);
+					float speed = (float)GD.RandRange(13f, 45f) * jet_vscale[j];
+					var vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
+					vel_[idx] = vel;
+					var spawnOffset = new Vector2(offset_x + (float)(GD.Randf() - 0.5) * 4f, 40f + (float)(GD.Randf() - 0.5) * 4f);
+					pos_[idx] = mouse_position_ + spawnOffset;
+					smoke_temp_[idx] = jet_temp[j];
+				}
+			}
+		}
+		else if (smoke_mode_ && mouse_pressed_)
+		{
+			int burst = 12;
+			float initTemp = 800f;
+			for (int s = 0; s < burst; s++)
+			{
+				int idx = spawn_index_ % ball_nums_;
+				spawn_index_++;
+				float angle = -Mathf.Pi * 0.5f + (float)GD.RandRange(-Mathf.Pi * 0.12f, Mathf.Pi * 0.12f);
+				float speed = (float)GD.RandRange(100f, 400f);
+				var vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
+				vel_[idx] = vel;
+				pos_[idx] = mouse_position_ + new Vector2(
+					(float)(GD.Randf() - 0.5) * 50f,
+					(float)(GD.Randf() - 0.5) * 30f
+				);
+				smoke_temp_[idx] = initTemp;
+			}
+		}
+		else if (spray_mode_ && mouse_pressed_)
+		{
+			int spawn_count = 8;
+			for (int s = 0; s < spawn_count; s++)
+			{
+				int idx = spawn_index_ % ball_nums_;
+				spawn_index_++;
+				float angle = -Mathf.Pi * 0.5f + (float)GD.RandRange(-Mathf.Pi * 0.04f, Mathf.Pi * 0.04f);
+				float speed = (float)GD.RandRange(2000f, 2100f);
+				var vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
+				vel_[idx] = vel;
+				float along = (float)GD.RandRange(50f, 110f);
+				pos_[idx] = mouse_position_ + vel.Normalized() * along;
+			}
+		}
+
 		float frameDt = (float)delta;
 		float subDt = frameDt / iterations_per_frame;
 
@@ -422,11 +458,32 @@ public partial class Ground : StaticBody2D
 			body_angle_[b] = body_nodes_[b].Rotation;
 		}
 
-		if ((spray_mode_ || smoke_mode_) && spawn_index_ > last_synced_spawn_)
+		if ((spray_mode_ || smoke_mode_ || fire_mode_) && spawn_index_ != last_synced_spawn_)
 		{
-			int count = spawn_index_ - last_synced_spawn_;
-			if (smoke_mode_) sph_gpu_.UpdateParticlesBatchWithTemp(last_synced_spawn_, pos_, vel_, smoke_temp_, count);
-			else if (count > 0) sph_gpu_.UpdateParticlesBatch(last_synced_spawn_, pos_, vel_, count);
+			int cur = spawn_index_ % ball_nums_;
+			int last = last_synced_spawn_ % ball_nums_;
+			if (cur > last)
+			{
+				int count = cur - last;
+				if (smoke_mode_ || fire_mode_) sph_gpu_.UpdateParticlesBatchWithTemp(last, pos_, vel_, smoke_temp_, count);
+				else sph_gpu_.UpdateParticlesBatch(last, pos_, vel_, count);
+			}
+			else if (cur < last)
+			{
+				// Wrap-around: sync tail then head
+				int count1 = ball_nums_ - last;
+				int count2 = cur;
+				if (smoke_mode_ || fire_mode_)
+				{
+					sph_gpu_.UpdateParticlesBatchWithTemp(last, pos_, vel_, smoke_temp_, count1);
+					sph_gpu_.UpdateParticlesBatchWithTemp(0, pos_, vel_, smoke_temp_, count2);
+				}
+				else
+				{
+					sph_gpu_.UpdateParticlesBatch(last, pos_, vel_, count1);
+					sph_gpu_.UpdateParticlesBatch(0, pos_, vel_, count2);
+				}
+			}
 			last_synced_spawn_ = spawn_index_;
 		}
 		DispatchGpu(frameDt, subDt);
@@ -494,10 +551,11 @@ public partial class Ground : StaticBody2D
 			viscosity_strength, collision_damping, 1f / 60f, 2000f,
 			bounds_min_, bounds_max_, mouse_pressed_, mouse_position_,
 			120f, 30f, 1500f, Position, spray_mode_, 1.8f, target_density, body_count_,
-			gas_stiffness, buoyancy_alpha, smoke_mode_ ? 1 : 0,
+			gas_stiffness, buoyancy_alpha, fire_mode_ ? 2 : (smoke_mode_ ? 1 : 0),
 			vorticity_epsilon, temp_diffusion_rate,
-			particle_lifetime, ambient_temperature,
-			cooling_rate, gas_viscosity_ratio);
+			(fire_mode_ ? particle_lifetime * 0.3f : particle_lifetime), ambient_temperature,
+			cooling_rate, gas_viscosity_ratio,
+			body_drag_gas);
 		sph_gpu_.DispatchFrame(frameDt, iterations_per_frame);
 	}
 
@@ -511,7 +569,9 @@ public partial class Ground : StaticBody2D
 			if (key.Keycode == Key.H) spec_strength = spec_strength > 0.01f ? 0f : 0.5f;
 			if (key.Keycode == Key.T) toon_levels = toon_levels < 0.5f ? 4f : 0f;
 			if (key.Keycode == Key.V) { show_sliders_ = !show_sliders_; if (slider_panel_ != null) slider_panel_.Visible = show_sliders_; }
-			if (key.Keycode == Key.M) { smoke_mode_ = !smoke_mode_; ResetParticles(); sph_gpu_.ResetParticles(pos_, vel_, Position); }
+			if (key.Keycode == Key.F) { fire_mode_ = !fire_mode_; if (fire_mode_) smoke_mode_ = false; ResetParticles(); sph_gpu_.ResetParticles(pos_, vel_, Position); }
+			if (key.Keycode == Key.Key1) { if (fire_mode_) debug_mode_ = (debug_mode_ + 1) % 3; }
+			if (key.Keycode == Key.M) { smoke_mode_ = !smoke_mode_; if (smoke_mode_) fire_mode_ = false; ResetParticles(); sph_gpu_.ResetParticles(pos_, vel_, Position); }
 			if (key.Keycode == Key.G) { debug_sprites_ = !debug_sprites_; SetParticleSpritesVisible(debug_sprites_); }
 			if (key.Keycode == Key.N && body_count_ > 0) { current_body_ = (current_body_ + 1) % body_count_; SwitchSdfShape(); }
 			if (key.Keycode == Key.B) { spray_mode_ = !spray_mode_; ResetParticles(); sph_gpu_.ResetParticles(pos_, vel_, Position); }
@@ -539,8 +599,8 @@ public partial class Ground : StaticBody2D
 		var toon_text = $"Toon: {toon_levels:0}";
 		DrawString(font, new Vector2(rx - font.GetStringSize(toon_text).X, y), toon_text, fontSize: 14, modulate: toon_levels > 0.5f ? Colors.Orange : Colors.Gray);
 		y += lh;
-		var mode_text = smoke_mode_ ? "SMOKE" : (spray_mode_ ? "SPRAY" : "GRAB");
-		var mode_color = smoke_mode_ ? Colors.Orange : (spray_mode_ ? Colors.Cyan : Colors.Green);
+		var mode_text = fire_mode_ ? "FIRE" : (smoke_mode_ ? "SMOKE" : (spray_mode_ ? "SPRAY" : "GRAB"));
+		var mode_color = fire_mode_ ? Colors.Red : (smoke_mode_ ? Colors.Orange : (spray_mode_ ? Colors.Cyan : Colors.Green));
 		DrawString(font, new Vector2(rx - font.GetStringSize(mode_text).X, y), mode_text, fontSize: 14, modulate: mode_color);
 		y += lh;
 		if (smoke_mode_)

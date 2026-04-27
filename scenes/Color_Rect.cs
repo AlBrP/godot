@@ -73,7 +73,8 @@ public partial class Color_Rect : ColorRect
 
 		shaderMaterial.SetShaderParameter("grid_cell_size", (double)ground_.smoothing_radius);
 		shaderMaterial.SetShaderParameter("ground_offset", ground_.Position);
-		shaderMaterial.SetShaderParameter("sim_mode", ground_.SmokeMode ? 1 : 0);
+		shaderMaterial.SetShaderParameter("sim_mode", ground_.FireMode ? 2 : (ground_.SmokeMode ? 1 : 0));
+		shaderMaterial.SetShaderParameter("debug_mode", ground_.DebugModeVal);
 	}
 
 	public override void _Input(InputEvent @event) { }

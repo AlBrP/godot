@@ -44,7 +44,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float cooling_rate;
     float gas_viscosity_ratio;
     float fluid_particle_mass;
-    float _pad9;
+    float body_drag_gas;
     float target_density;
 };
 

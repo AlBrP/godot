@@ -207,9 +207,10 @@ public class SphGpu
 
 	private void CreateUniformSets()
 	{
-		// Pass 1: Forces+Hash — particle(0), hash(1), params(7)
+		// Pass 1: Forces+Hash — particle(0), hash(1), body_data(8), params(7)
 		uniform_set_forces_hash = MakeUniformSet(shader_forces_hash, 0, new Godot.Collections.Array<RDUniform> {
 			MakeStorageUniform(0, particle_buf), MakeStorageUniform(1, hash_buf),
+			MakeStorageUniform(8, body_data_buf),
 			MakeUniformUniform(7, params_ubuf),
 		});
 		// Pass 2: Histogram
@@ -325,7 +326,8 @@ public class SphGpu
 		float gasStiffness = 0f, float buoyancyAlpha = 0f, int simMode = 0,
 		float vorticityEpsilon = 0f, float tempDiffusionRate = 0f,
 		float particleLifetime = 0f, float ambientTemperature = 0f,
-		float coolingRate = 0f, float gasViscosityRatio = 0f)
+		float coolingRate = 0f, float gasViscosityRatio = 0f,
+		float bodyDragGas = 0f)
 	{
 		byte[] data = new byte[PARAMS_BUF_SIZE];
 		int offset = 0;
@@ -363,7 +365,7 @@ public class SphGpu
 		WriteFloat(data, ref offset, coolingRate);            // 140
 		WriteFloat(data, ref offset, gasViscosityRatio);      // 144
 		WriteFloat(data, ref offset, fluidParticleMass);     // 148
-		WriteFloat(data, ref offset, 0f);                    // 152 padding
+		WriteFloat(data, ref offset, bodyDragGas);            // 152
 		WriteFloat(data, ref offset, targetDensity);          // 156
 		// Total: 160 bytes
 		RD.BufferUpdate(params_ubuf, 0, PARAMS_BUF_SIZE, data);

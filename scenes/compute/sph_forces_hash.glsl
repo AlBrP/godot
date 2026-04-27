@@ -49,8 +49,26 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float cooling_rate;
     float gas_viscosity_ratio;
     float fluid_particle_mass;
-    float _pad9;
+    float body_drag_gas;
     float target_density;
+};
+
+const int MAX_BODIES = 4;
+
+struct Body {
+    vec2 pos;
+    vec2 vel;
+    vec2 sdf_half_extents;
+    float angle;
+    float shape_radius;
+    float boundary_volume;
+    float bp_scale;
+    int enabled;
+    float _pad;
+};
+
+layout(set = 0, binding = 8, std430) readonly buffer BodyDataBuffer {
+    Body bodies[MAX_BODIES];
 };
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
@@ -89,31 +107,74 @@ void main() {
         return;
     }
 
-    // Smoke physics: clean formulation, no procedural tricks
-    if (sim_mode == 1) {
+    // Gas/smoke/fire physics: shared formulation, parameterized by init_temp
+    if (sim_mode == 1 || sim_mode == 2) {
         int ti = temperature_offset(int(i));
         int ai = age_offset(int(i));
         float my_temp = particle_data[ti];
         float my_age = particle_data[ai];
+        float init_temp = sim_mode == 2 ? 1500.0 : 800.0;
+        float cool_rate = sim_mode == 2 ? cooling_rate * 15.0 : cooling_rate;
         // Init temperature for freshly spawned particles
         if (my_age < sub_dt * 3.0) {
-            my_temp = 800.0;
+            my_temp = init_temp;
             particle_data[ti] = my_temp;
         }
-        // Newton cooling to ambient
-        my_temp -= cooling_rate * sub_dt;
+        // Newton cooling: hot core protected, edges cool fast (flame shape driver)
+        float core_protection = smoothstep(ambient_temperature, init_temp, my_temp);
+        float cool_factor = 1.0 - core_protection * 0.8;
+        my_temp -= cool_rate * cool_factor * sub_dt;
         my_temp = max(my_temp, ambient_temperature);
         particle_data[ti] = my_temp;
-        // Boussinesq approximation: buoyancy = -beta * (T-T0) * g = g * beta * (1 - T/T0)
-        v.y += gravity * buoyancy_alpha * (1.0 - my_temp / ambient_temperature) * sub_dt;
-        // Subgrid eddy model (LES): models unresolved turbulent eddies at sub-particle scale
-        float temp_factor = my_temp / 800.0;
-        float vx = p.x * 0.03;
-        float vy = p.y * 0.025;
-        float eddy_x = sin(vy + cos(vx * 0.7) * 1.5) * 900.0 * temp_factor;
-        float eddy_y = (cos(vx * 1.1) * sin(vy * 0.8) * 0.5 + sin(vx * 0.5 + vy) * 0.3) * 500.0 * temp_factor;
+        // Boussinesq buoyancy: fire reduced 30%
+        float bf = sim_mode == 2 ? buoyancy_alpha * 0.7 : buoyancy_alpha;
+        v.y += gravity * bf * (1.0 - my_temp / ambient_temperature) * sub_dt;
+        // Subgrid eddy model (LES)
+        float temp_factor = my_temp / init_temp;
+        float eddy_x, eddy_y;
+        if (sim_mode == 2) {
+            // Fire: tightened eddy
+            float sway = p.y * 0.031;
+            float pid = float(i) * 0.7;
+            eddy_x = sin(sway + pid) * 1100.0 * temp_factor;
+            eddy_x += cos(sway * 2.1 + pid * 1.3) * 360.0 * temp_factor;
+            eddy_y = cos(sway * 1.4 + pid * 0.6) * 240.0 * temp_factor;
+            eddy_y += sin(sway * 3.0 + pid) * 150.0 * temp_factor;
+        } else {
+            // Smoke: original eddy model
+            float phase = float(i) * 2.399 + p.x * 0.037 + p.y * 0.029;
+            float phase2 = float(i) * 1.713 + p.x * 0.053 - p.y * 0.041;
+            eddy_x = (sin(phase * 0.9 + cos(phase2 * 0.7) * 1.6)
+                    + cos(phase2 * 1.1) * sin(phase * 0.6) * 0.7) * 900.0 * temp_factor;
+            eddy_y = (cos(phase * 1.3) * sin(phase2 * 0.8) * 0.5
+                    + sin(phase * 0.5 + phase2) * 0.3
+                    + cos(phase2 * 0.4 + phase) * 0.2) * 500.0 * temp_factor;
+        }
         v.x += eddy_x * sub_dt;
         v.y += eddy_y * sub_dt;
+        // Body interaction: boundary layer drag + wake (physical, no trick)
+        for (int b = 0; b < body_count; b++) {
+            if (bodies[b].enabled == 0) continue;
+            vec2 to_body = p - bodies[b].pos;
+            float dist = length(to_body);
+            float radius = bodies[b].shape_radius;
+            float influence = radius * 3.5;
+            if (dist < influence && dist > 0.001) {
+                vec2 dir = to_body / dist;
+                // Partial no-slip: boundary layer drag
+                float drag = (1.0 - smoothstep(radius, influence, dist)) * body_drag_gas;
+                v = mix(v, bodies[b].vel, drag * sub_dt);
+                // Wake: low pressure behind moving body (Bernoulli)
+                vec2 body_vel_dir = normalize(bodies[b].vel + vec2(0.001));
+                float behind = -dot(body_vel_dir, dir);
+                if (behind > 0.0) {
+                    float taper = 1.0 - abs(behind);
+                    float wake_pressure = behind * taper * body_drag_gas * 2.0;
+                    float wake_dist = (dist - radius) * 0.5;
+                    v += body_vel_dir * wake_pressure / max(wake_dist, 0.1) * sub_dt;
+                }
+            }
+        }
         // Minimal weight for gas
         v.y += gravity * 0.03 * sub_dt;
     } else {

@@ -54,7 +54,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float cooling_rate;
     float gas_viscosity_ratio;
     float fluid_particle_mass;
-    float _pad9;
+    float body_drag_gas;
     float target_density;
 };
 
@@ -83,11 +83,14 @@ void main() {
         vec2 v = vec2(particle_data[vi], particle_data[vi + 1]);
         float vn_x = clamp(v.x / max_vel * 0.5 + 0.5, 0.0, 1.0);
         float vn_y = clamp(v.y / max_vel * 0.5 + 0.5, 0.0, 1.0);
-        if (sim_mode == 1) {
+        if (sim_mode >= 1) {
             float temp = particle_data[temperature_offset(int(pidx))];
-            float tn = clamp(temp / 1000.0, 0.0, 1.0);
-            float den = clamp(particle_data[density_offset(int(pidx))] * 10.0, 0.0, 1.0);
-            imageStore(position_tex, tex_coord, vec4(world_pos, tn + 0.5, den));
+            float temp_scale = sim_mode == 2 ? 1500.0 : 1000.0;
+            float tn = clamp(temp / temp_scale, 0.0, 1.0);
+            int vi = vel_offset(int(pidx));
+            float vx = particle_data[vi];
+            float vn_x = clamp(vx / max_vel * 0.5 + 0.5, 0.0, 1.0);
+            imageStore(position_tex, tex_coord, vec4(world_pos, tn, vn_x));
         } else {
             imageStore(position_tex, tex_coord, vec4(world_pos, vn_x, vn_y));
         }

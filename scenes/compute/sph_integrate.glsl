@@ -61,7 +61,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float cooling_rate;
     float gas_viscosity_ratio;
     float fluid_particle_mass;
-    float _pad9;
+    float body_drag_gas;
     float target_density;
 };
 
@@ -91,11 +91,12 @@ void main() {
         if (dist < sr && dist > 0.0001) {
             float penetration = sr - dist;
             vec2 normal = diff / dist;
-            p += normal * penetration;
+            float push_strength = sim_mode == 1 ? 0.1 : 1.0;
+            p += normal * penetration * push_strength;
             vec2 rel_v = v - bodies[b].vel;
             float vn = dot(rel_v, normal);
             if (vn < 0.0)
-                v = bodies[b].vel + reflect(rel_v, normal) * collision_damping;
+                v = bodies[b].vel + reflect(rel_v, normal) * (sim_mode == 1 ? 0.2 : collision_damping);
         }
     }
 
@@ -105,8 +106,8 @@ void main() {
     if (p.y < bounds_min.y) { p.y = bounds_min.y; v.y *= -collision_damping; }
     else if (p.y > bounds_max.y) { p.y = bounds_max.y; v.y *= -collision_damping; }
 
-    // Smoke particle lifecycle
-    if (sim_mode == 1) {
+    // Smoke/fire particle lifecycle
+    if (sim_mode >= 1) {
         int ai = age_offset(i);
         particle_data[ai] += sub_dt;
         if (particle_data[ai] > particle_lifetime) {
