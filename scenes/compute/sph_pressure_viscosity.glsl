@@ -162,6 +162,7 @@ int density_offset(int i) { return particle_count * 6 + i; }
 int near_density_offset(int i) { return particle_count * 7 + i; }
 int temperature_offset(int i) { return particle_count * 8 + i; }
 int type_offset(int i) { return particle_count * 10 + i; }
+int curl_offset(int i) { return particle_count * 11 + i; }
 
 #define PTYPE_WATER  0
 #define PTYPE_FIRE   1
@@ -204,7 +205,7 @@ void main() {
         float temp_ratio = my_temp / ambient_temperature;
         float gs = ptype_stiffness[my_type];
         my_pressure = my_density * gs * temp_ratio;
-        my_near_pressure = my_near_density * gs * 0.1 * temp_ratio;
+        my_near_pressure = my_near_density * gs * temp_ratio * 0.15;
     } else {
         my_pressure = pressure_from_density(my_density);
         my_near_pressure = near_pressure_from_density(my_near_density);
@@ -214,6 +215,7 @@ void main() {
     vec2 viscosity_force = vec2(0.0);
     float temp_delta = 0.0;
     float my_curl = 0.0;
+    float Sxx = 0.0, Sxy = 0.0, Syy = 0.0;  // LES Smagorinsky strain rate tensor
 
     ivec2 my_cell = grid_cell_coord[idx];
     float sr_sq = smoothing_radius_sq;
@@ -246,7 +248,7 @@ void main() {
                     float nb_temp_ratio = nb_temp / ambient_temperature;
                     float ngs = ptype_stiffness[nb_type];
                     nb_pressure = nb_density * ngs * nb_temp_ratio;
-                    nb_near_pressure = nb_near_density * ngs * 0.1 * nb_temp_ratio;
+                    nb_near_pressure = nb_near_density * ngs * nb_temp_ratio * 0.15;
                 } else {
                     nb_pressure = pressure_from_density(nb_density);
                     nb_near_pressure = near_pressure_from_density(nb_near_density);
@@ -267,6 +269,11 @@ void main() {
                     float dvy = other_vel.y - my_vel.y;
                     float kernel_grad = spiky_pow2_derivative(dist);
                     my_curl += (dvx * dir.y - dvy * dir.x) * kernel_grad / max(nb_density, 0.0001);
+                    // LES: accumulate strain rate tensor
+                    float inv_nb = 1.0 / max(nb_density, 0.0001);
+                    Sxx += dvx * dir.x * kernel_grad * inv_nb;
+                    Sxy += 0.5 * (dvx * dir.y + dvy * dir.x) * kernel_grad * inv_nb;
+                    Syy += dvy * dir.y * kernel_grad * inv_nb;
                 }
             }
         }
@@ -274,8 +281,16 @@ void main() {
 
     vec2 acceleration = pressure_force / my_density;
     float visc_mult = ptype_viscosity[my_type];
-    particle_data[vi] += acceleration.x * sub_dt + viscosity_force.x * viscosity_strength * visc_mult * sub_dt;
-    particle_data[vi + 1] += acceleration.y * sub_dt + viscosity_force.y * viscosity_strength * visc_mult * sub_dt;
+    float les_boost = 1.0;
+    if (my_type != PTYPE_WATER) {
+        float strain_mag = sqrt(max(Sxx*Sxx + 2.0*Sxy*Sxy + Syy*Syy, 0.0));
+        float Cs = 0.08;
+        float delta = smoothing_radius;
+        float nu_t = Cs * Cs * delta * delta * strain_mag;
+        les_boost += clamp(nu_t * 2.0, 0.0, 1.0);
+    }
+    particle_data[vi] += acceleration.x * sub_dt + viscosity_force.x * viscosity_strength * visc_mult * les_boost * sub_dt;
+    particle_data[vi + 1] += acceleration.y * sub_dt + viscosity_force.y * viscosity_strength * visc_mult * les_boost * sub_dt;
 
     // Vorticity confinement + temperature diffusion (gas types only)
     if (my_type != PTYPE_WATER) {
@@ -288,6 +303,8 @@ void main() {
             particle_data[vi] += vort_force.x * sub_dt;
             particle_data[vi + 1] += vort_force.y * sub_dt;
         }
+        // Store real curl for next frame's eddy model
+        particle_data[curl_offset(idxi)] = my_curl;
     }
 
     // Boundary pressure force - loop over all active bodies

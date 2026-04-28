@@ -78,6 +78,7 @@ int vel_offset(int i) { return particle_count * 2 + i * 2; }
 int density_offset(int i) { return particle_count * 6 + i; }
 int temperature_offset(int i) { return particle_count * 8 + i; }
 int type_offset(int i) { return particle_count * 10 + i; }
+int curl_offset(int i) { return particle_count * 11 + i; }
 
 #define PTYPE_WATER  0
 #define PTYPE_FIRE   1
@@ -124,8 +125,8 @@ void main() {
             float gs = ptype_stiffness[my_type];
             pressure_out = dens * gs * (temp / max(ambient_temperature, 1.0));
 
-            // Curl proxy: velocity magnitude * temperature ratio
-            curl_out = length(vel_out) * (temp / max(ambient_temperature, 1.0));
+            // Real curl from pressure_viscosity pass (stored in particle buffer)
+            curl_out = particle_data[curl_offset(int(pidx))];
         } else {
             int vi_w = vel_offset(int(pidx));
             vel_out = vec2(particle_data[vi_w], particle_data[vi_w + 1]);

@@ -84,6 +84,7 @@ int pred_offset(int i) { return particle_count * 4 + i * 2; }
 int temperature_offset(int i) { return particle_count * 8 + i; }
 int age_offset(int i) { return particle_count * 9 + i; }
 int type_offset(int i) { return particle_count * 10 + i; }
+int curl_offset(int i) { return particle_count * 11 + i; }
 
 #define PTYPE_WATER  0
 #define PTYPE_FIRE   1
@@ -138,28 +139,25 @@ void main() {
             my_temp = init_temp;
             particle_data[ti] = my_temp;
         }
-        // Newton cooling: hot core protected, edges cool fast
-        float core_protection = smoothstep(ambient_temperature, init_temp, my_temp);
-        float cool_factor = 1.0 - core_protection * 0.8;
-        my_temp -= cool_rate * cool_factor * sub_dt;
+        // Uniform Newton cooling (no core protection — lets extinguishing emerge)
+        my_temp -= cool_rate * sub_dt;
         my_temp = max(my_temp, ambient_temperature);
         particle_data[ti] = my_temp;
-        // Boussinesq buoyancy
+        // Ideal gas buoyancy: rho ∝ 1/T (PV=nRT), F = g*(1 - T_ambient/T)
         float bf = ptype_buoyancy[my_type];
-        v.y += gravity * bf * (1.0 - my_temp / ambient_temperature) * sub_dt;
+        float T_ratio = my_temp / max(ambient_temperature, 0.001);
+        v.y -= gravity * bf * (T_ratio - 1.0) * sub_dt;
         // Subgrid eddy model (LES)
         float temp_factor = my_temp / max(init_temp, 1.0);
         float eddy_x, eddy_y;
         if (my_type == PTYPE_FIRE) {
-            // Fire: reduced lateral spread for columnar flame shape
-            float sway = p.y * 0.031;
-            float pid = float(i) * 0.7;
-            float rise_h = clamp((mouse_pos.y - p.y) / 100.0, 0.0, 1.0);
-            float top_spread = 1.0 + rise_h * 2.5;
-            eddy_x = sin(sway + pid) * 1100.0 * temp_factor * top_spread;
-            eddy_x += cos(sway * 2.1 + pid * 1.3) * 360.0 * temp_factor * top_spread;
-            eddy_y = cos(sway * 1.4 + pid * 0.6) * 120.0 * temp_factor;
-            eddy_y += sin(sway * 3.0 + pid) * 60.0 * temp_factor;
+            // Real curl-driven eddy: force perpendicular to velocity, strength from stored curl
+            float my_curl = particle_data[curl_offset(int(i))];
+            vec2 vel_dir = normalize(v + vec2(0.001));
+            vec2 lateral = vec2(-vel_dir.y, vel_dir.x);
+            float strength = clamp(my_curl * 400.0, -2000.0, 2000.0) * temp_factor;
+            eddy_x = lateral.x * strength;
+            eddy_y = lateral.y * strength * 0.15;
         } else {
             // Smoke/steam: original eddy model
             float phase = float(i) * 2.399 + p.x * 0.037 + p.y * 0.029;
@@ -172,13 +170,6 @@ void main() {
         }
         v.x += eddy_x * sub_dt;
         v.y += eddy_y * sub_dt;
-        // Column guidance only for fire
-        if (my_type == PTYPE_FIRE) {
-            float dx = p.x - mouse_pos.x;
-            float rise = mouse_pos.y - p.y;
-            float guide_zone = smoothstep(20.0, 50.0, rise) * smoothstep(120.0, 90.0, rise);
-            v.x -= dx * 2.8 * guide_zone * temp_factor * sub_dt;
-        }
         // Body interaction: boundary layer drag + wake
         for (int b = 0; b < body_count; b++) {
             if (bodies[b].enabled == 0) continue;

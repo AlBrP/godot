@@ -79,7 +79,7 @@ public class SphGpu
 	private Rid uniform_set_output_1;
 
 	// Buffer sizes
-	private const int PARTICLE_BUF_SIZE = N * (8 + 8 + 8 + 4 + 4 + 4 + 4 + 4); // stride=11 floats
+	private const int PARTICLE_BUF_SIZE = N * (8 + 8 + 8 + 4 + 4 + 4 + 4 + 4 + 4); // stride=12 floats (pos,vel,pred,density,near_density,temp,age,type,curl)
 	private const int HASH_BUF_SIZE = N * (4 + 8);
 	private const int SORT_BUF_SIZE = N * (4 + 4);
 	private const int HASHTABLE_BUF_SIZE = N * (4 + 4);
@@ -497,6 +497,7 @@ public class SphGpu
 		RD.BufferClear(particle_buf, (uint)(N * 16), (uint)(N * 16));  // pred + density + near_density
 		RD.BufferClear(particle_buf, (uint)(N * 32), (uint)(N * 8));   // temp + age
 		RD.BufferClear(particle_buf, (uint)(N * 40), (uint)(N * 4));   // type
+		RD.BufferClear(particle_buf, (uint)(N * 44), (uint)(N * 4));   // curl
 	}
 
 	public byte[] ReadBackParticleBuffer()
@@ -601,6 +602,7 @@ public class SphGpu
 		RD.BufferUpdate(particle_buf, (uint)(N * 8 + startIndex * 8), (uint)velData.Length, velData);
 		RD.BufferUpdate(particle_buf, (uint)(N * 32 + startIndex * 4), (uint)tempData.Length, tempData);
 		RD.BufferUpdate(particle_buf, (uint)(N * 40 + startIndex * 4), (uint)typeData.Length, typeData);
+		RD.BufferClear(particle_buf, (uint)(N * 44 + startIndex * 4), (uint)(count * 4));  // curl
 	}
 
 	public void Free()
