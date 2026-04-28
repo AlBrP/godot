@@ -82,6 +82,14 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float fluid_particle_mass;
     float body_drag_gas;
     float target_density;
+    vec4 ptype_stiffness;
+    vec4 ptype_buoyancy;
+    vec4 ptype_viscosity;
+    vec4 ptype_vorticity;
+    vec4 ptype_diffusion;
+    vec4 ptype_cooling;
+    vec4 ptype_init_temp;
+    vec4 ptype_lifetime;
 };
 
 float spiky_pow2_scale;
@@ -122,6 +130,12 @@ int vel_offset(int i) { return particle_count * 2 + i * 2; }
 int pred_offset(int i) { return particle_count * 4 + i * 2; }
 int density_offset(int i) { return particle_count * 6 + i; }
 int near_density_offset(int i) { return particle_count * 7 + i; }
+int type_offset(int i) { return particle_count * 10 + i; }
+
+#define PTYPE_WATER  0
+#define PTYPE_FIRE   1
+#define PTYPE_SMOKE  2
+#define PTYPE_STEAM  3
 
 const int HASH_K1 = 15823;
 const int HASH_K2 = 9737333;

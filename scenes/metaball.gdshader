@@ -34,8 +34,18 @@ uniform float spec_strength = 0.5;
 uniform float toon_levels = 0.0;
 uniform float color_band = 2.2;     // >1 pushes bands inward (less yellow), <1 spreads out (more yellow) // 0=off (continuous gradient), >0=quantized levels
 
-uniform int sim_mode = 0;
 uniform int debug_mode = 0;
+uniform sampler2D physics_texture;
+
+// Particle type constants
+const int PTYPE_WATER = 0;
+const int PTYPE_FIRE = 1;
+const int PTYPE_SMOKE = 2;
+const int PTYPE_STEAM = 3;
+
+int particle_type(vec4 pdata) {
+    return int(pdata.b * 16.0 + 0.5);
+}
 
 // Hash constants (must match C# side)
 const int HASH_K1 = 15823;
@@ -67,11 +77,20 @@ void fragment() {
 		worldPos.y < bbox_min.y - cutoff || worldPos.y > bbox_max.y + cutoff) discard;
 
 	float total = 0.0;
+	float total_water = 0.0;
+	float total_fire = 0.0;
+	float total_smoke = 0.0;
 	vec2 avg_vel = vec2(0.0);
 	float vel_weight_sum = 0.0;
-	float avg_vx = 0.0;       // fire mode: lateral velocity
-	float sum_pos_x = 0.0;    // fire mode: centroid X
-	float sum_pos_y = 0.0;    // fire mode: centroid Y
+	float sum_pos_x = 0.0;
+	float sum_pos_y = 0.0;
+	float fire_weight_sum = 0.0;
+	float smoke_temp_sum = 0.0;
+	float avg_vx = 0.0, avg_vy = 0.0;
+	float vel_weight_sum_fire = 0.0;
+	float avg_curl = 0.0, curl_weight_sum = 0.0;
+	float avg_pressure = 0.0, press_weight = 0.0;
+	float fire_temp_sum = 0.0, fire_temp_weight = 0.0;
 	float inv_2sq = 1.0 / (2.0 * sigma * sigma);
 	float cutoff_sq = 9.0 * sigma * sigma;
 
@@ -112,12 +131,14 @@ void fragment() {
 				vec4 pdata = texelFetch(raw_position_texture, ivec2(px, py), 0);
 				float w;
 				vec2 pdiff = worldPos - pdata.rg;
-				if (sim_mode == 2) {
-					float temp_n = pdata.b;  // 0-1, mapped to 0-1500K
+				int ptype = particle_type(pdata);
+				float extra = pdata.a; // temp_n for fire/smoke, density_n for water
+				if (ptype == PTYPE_FIRE) {
+					float temp_n = extra;
 					if (temp_n < 0.12) { w = 0.0; }
 					else {
 						float r = length(pdiff);
-						float dy = worldPos.y - pdata.rg.y;  // positive = above particle
+						float dy = worldPos.y - pdata.g;
 						float sigma_x = 10.0;
 						float sigma_up = 12.0;
 						float sigma_down = 24.0;
@@ -126,38 +147,77 @@ void fragment() {
 						float tongue_field = exp(-0.5 * (sx * sx + sy * sy));
 						float heat = pow(temp_n, 1.5);
 						w = tongue_field * field_strength * heat * 5.0;
+
+						// Accumulate physics data from physics texture
+						ivec2 ptex_coord = ivec2(px, py);
+						vec4 pphys = texelFetch(physics_texture, ptex_coord, 0);
+						vec2 pvel = pphys.rg;
+						float pcurl = pphys.b;
+						float ppress = pphys.a;
+
+						float vel_weight = temp_n * w;
+						avg_vx += pvel.x * vel_weight;
+						avg_vy += pvel.y * vel_weight;
+						vel_weight_sum_fire += vel_weight;
+
+						avg_curl += pcurl * w;
+						curl_weight_sum += w;
+
+						avg_pressure += ppress * w;
+						press_weight += w;
+
+						fire_temp_sum += temp_n * w;
+						fire_temp_weight += w;
 					}
-					// Decode lateral velocity from .a channel
-					float vx = (pdata.a - 0.5) * 2.0 * 2000.0;
-					avg_vx += vx * w;
+					total_fire += w;
 					sum_pos_x += pdata.r * w;
 					sum_pos_y += pdata.g * w;
-				} else {
+					fire_weight_sum += w;
+				} else if (ptype == PTYPE_SMOKE || ptype == PTYPE_STEAM) {
 					w = particle_contrib(pdiff, inv_2sq, cutoff_sq);
+					total_smoke += w;
+					smoke_temp_sum += extra * w;
+				} else {
+					// Water
+					w = particle_contrib(pdiff, inv_2sq, cutoff_sq);
+					total_water += w;
 				}
 				total += w;
-				if (sim_mode != 2) {
-					avg_vel += (pdata.ba - 0.5) * w;
-				}
 				vel_weight_sum += w;
 			}
 		}
 	}
 
-	if (vel_weight_sum > 0.001) avg_vel /= vel_weight_sum;
+	if (fire_weight_sum > 0.001) {
+		sum_pos_x /= fire_weight_sum;
+		sum_pos_y /= fire_weight_sum;
+	}
+	if (vel_weight_sum_fire > 0.001) {
+		avg_vx /= vel_weight_sum_fire;
+		avg_vy /= vel_weight_sum_fire;
+	}
+	if (curl_weight_sum > 0.001) {
+		avg_curl /= curl_weight_sum;
+	}
+	if (press_weight > 0.001) {
+		avg_pressure /= press_weight;
+	}
 
-	// Fire mode: hierarchical cartoon flame (main body + side tongues)
-	if (sim_mode == 2) {
+	// Fire: hierarchical cartoon flame (main body + side tongues)
+	if (total_fire > 0.01) {
 		float ft = time * 1.6;
 
 		// Flame centroid and stats
-		float flame_cx = vel_weight_sum > 0.001 ? (sum_pos_x / vel_weight_sum) : worldPos.x;
-		float flame_cy = vel_weight_sum > 0.001 ? (sum_pos_y / vel_weight_sum) : worldPos.y;
-		float mean_vx = vel_weight_sum > 0.001 ? (avg_vx / vel_weight_sum) : 0.0;
+		float flame_cx = fire_weight_sum > 0.001 ? sum_pos_x : worldPos.x;
+		float flame_cy = fire_weight_sum > 0.001 ? sum_pos_y : worldPos.y;
 
 		// Flame scale: nearly constant (not per-pixel!) to avoid shape following particle cone
-		float mass_norm = 0.82 + 0.18 * smoothstep(8.0, 60.0, total); // narrow range: 0.82~1.0
-		float flame_h = 260.0 * pow(mass_norm, 0.25); // ~255~265: almost fixed height
+		float mass_norm = 0.82 + 0.18 * smoothstep(8.0, 60.0, total_fire);
+		// Physics-driven flame height: proportional to temperature and upward velocity
+		float avg_upward = vel_weight_sum_fire > 0.001 ? abs(min(avg_vy, 0.0)) : 1.0;
+		float avg_temp_clamped = fire_temp_weight > 0.001 ? clamp(fire_temp_sum / fire_temp_weight, 0.0, 1.0) : 0.5;
+		float thermal_power = avg_temp_clamped * (0.5 + avg_upward * 0.008);
+		float flame_h = 160.0 + 200.0 * thermal_power * pow(mass_norm, 0.25);
 		float flame_hw = flame_h * 0.15;
 
 		// Local Y: 0=base, positive going upward (Godot Y increases downward)
@@ -165,16 +225,16 @@ void fragment() {
 		float local_y = base_y - worldPos.y;
 		float ny = local_y / max(flame_h, 1.0); // normalized height
 
-		// Wind sways entire flame (tips more than base)
-		float wind = mean_vx * 0.0002;
-		float flame_axis_x = flame_cx + wind * (1.0 + ny * 0.6);
+		// Flame axis: center on centroid
+		float flame_axis_x = flame_cx;
 
 		// Edge noise: subtle jitter on tongue edges only (not main body)
 		float edge_noise = fract(sin(dot(worldPos.xy * 0.08 + ft * 2.0, vec2(12.9898, 78.233))) * 43758.5453);
 		edge_noise = mix(0.95, 1.05, edge_noise);
 
 		// Main body width: solid pillar, no holes
-		float main_w = flame_hw * 0.55 * mix(1.0, 0.08, smoothstep(0.0, 1.05, ny));
+		float pressure_factor = 0.7 + 0.3 * clamp(avg_pressure / 5000.0, 0.0, 1.0);
+		float main_w = flame_hw * 0.55 * pressure_factor * mix(1.0, 0.08, smoothstep(0.0, 1.05, ny));
 
 		// ---- Main flame body (wide central pillar) ----
 		float main_dist = abs((worldPos.x - flame_axis_x) / max(main_w, 0.5));
@@ -203,8 +263,11 @@ void fragment() {
 			if (ty < -0.04 || ty > 1.08) continue;
 
 			float time_i = ft * (1.0 + float(ti) * 0.12);
-			float sw = sin(local_y * s_sfreq[ti] + time_i + s_phase[ti]) * s_sway[ti];
-			sw += sin(local_y * s_sfreq[ti] * 2.1 + time_i * 1.4 + s_phase[ti] * 1.3) * s_sway[ti] * 0.25;
+			// Physics-driven sway: horizontal velocity + curl jitter + residual procedural
+			float phys_sway = avg_vx * 0.15;
+			float curl_jitter = (avg_curl - 0.5) * s_sway[ti] * 0.25;
+			float residual = sin(local_y * s_sfreq[ti] + s_phase[ti]) * s_sway[ti] * 0.08;
+			float sw = phys_sway + curl_jitter + residual;
 			float cx = flame_axis_x + sign_side[ti] * offset_x[ti] * flame_hw * edge_noise + sw;
 
 			float bw = s_bw[ti] * flame_hw * (0.80 + mass_norm * 0.20) * edge_noise;
@@ -235,8 +298,10 @@ void fragment() {
 			if (ty < -0.05 || ty > 1.06) continue;
 
 			float time_i = ft * (1.3 + float(ei) * 0.2);
-			float sw = sin(local_y * e_sf[ei] + time_i + e_ph[ei]) * e_sw[ei];
-			sw += sin(local_y * e_sf[ei] * 2.5 + time_i * 1.8) * e_sw[ei] * 0.30;
+			float phys_sway = avg_vx * 0.15;
+			float curl_jitter = (avg_curl - 0.5) * e_sw[ei] * 0.30;
+			float residual = sin(local_y * e_sf[ei] + e_ph[ei]) * e_sw[ei] * 0.08;
+			float sw = phys_sway + curl_jitter + residual;
 			float cx = flame_axis_x + e_sign[ei] * e_ox[ei] * flame_hw * edge_noise + sw;
 
 			float bw = 0.042 * flame_hw * (0.85 + mass_norm * 0.15) * edge_noise;
@@ -269,8 +334,10 @@ void fragment() {
 			if (ty < -0.06 || ty > 1.10) continue;
 
 			float time_i = ft * (1.6 + float(tpi) * 0.18);
-			float sw = sin(local_y * tp_sf[tpi] + time_i + tp_ph[tpi]) * tp_sw[tpi];
-			sw += sin(local_y * tp_sf[tpi] * 2.3 + time_i * 1.6) * tp_sw[tpi] * 0.35;
+			float phys_sway = avg_vx * 0.15;
+			float curl_jitter = (avg_curl - 0.5) * tp_sw[tpi] * 0.35;
+			float residual = sin(local_y * tp_sf[tpi] + tp_ph[tpi]) * tp_sw[tpi] * 0.08;
+			float sw = phys_sway + curl_jitter + residual;
 			float cx = flame_axis_x + tp_sign[tpi] * tp_ox[tpi] * flame_hw * edge_noise + sw;
 
 			float bw = tp_bw[tpi] * flame_hw * edge_noise;
@@ -308,8 +375,8 @@ void fragment() {
 		}
 		shape_field = max(shape_field, base_arc * 0.7);
 
-		// Particle density gate (same as original)
-		float density_gate = smoothstep(0.01, 0.12, total * 0.01);
+		// Particle density gate
+		float density_gate = smoothstep(0.01, 0.12, total_fire * 0.01);
 		float flame_field = shape_field * density_gate;
 
 		// Edge AA
@@ -334,11 +401,17 @@ void fragment() {
 			vec3 edge_orange = vec3(0.92, 0.30, 0.04);
 			vec3 tip_red     = vec3(0.72, 0.12, 0.02);
 
-			// Gradient: product keeps yellow only at bottom-center
+			// Physics-driven color: temperature + geometric blend
+			float avg_temp = fire_temp_weight > 0.001 ? fire_temp_sum / fire_temp_weight : 0.0;
+			float temp_coreness = pow(clamp(avg_temp, 0.0, 1.0), 1.2);
+
 			float dist_from_axis = abs(worldPos.x - flame_axis_x) / max(flame_hw * 0.52, 1.0);
 			float height_cool = smoothstep(0.0, 1.0, ny);
 			float radial_cool = smoothstep(0.0, 1.0, dist_from_axis * 1.7);
-			float coreness = (1.0 - height_cool * 0.88) * (1.0 - radial_cool * 0.82);
+			float geo_coreness = (1.0 - height_cool * 0.88) * (1.0 - radial_cool * 0.82);
+
+			// Temperature dominates (70%), geometry as fallback (30%)
+			float coreness = temp_coreness * 0.7 + geo_coreness * 0.3;
 			float color_t = clamp(coreness, 0.0, 1.0);
 			if (color_band > 1.01 || color_band < 0.99)
 				color_t = pow(color_t, color_band);
@@ -382,10 +455,10 @@ void fragment() {
 			float flame_alpha = 0.45 + in_flame * 0.52;
 			COLOR = vec4(flame_color, flame_alpha);
 		}
-	} else if (sim_mode == 1) {
-		float avg_temp = vel_weight_sum > 0.001 ? avg_vel.x : 0.0;
+	} else if (total_smoke > 0.01) {
+		float avg_temp = vel_weight_sum > 0.001 ? smoke_temp_sum / vel_weight_sum : 0.0;
 		float temp_opacity = smoothstep(0.15, 0.55, avg_temp);
-		float smoke_alpha = smoothstep(0.2, 2.0, total) * 0.65 * temp_opacity;
+		float smoke_alpha = smoothstep(0.2, 2.0, total_smoke) * 0.65 * temp_opacity;
 		// Steam white: hot vapor (dense white) to cool condensate (thin gray-white)
 		vec3 dense_steam   = vec3(0.95, 0.97, 1.0);
 		vec3 steam         = vec3(0.88, 0.90, 0.93);
@@ -401,29 +474,29 @@ void fragment() {
 		}
 		COLOR = vec4(smoke_color, smoke_alpha);
 	} else if (debug_mode == 1) {
-		float t = clamp(total / (body_threshold * 1.5), 0.0, 1.0);
+		float t = clamp(total_water / (body_threshold * 1.5), 0.0, 1.0);
 		vec3 heat;
 		if (t < 0.5) heat = mix(vec3(0.0, 0.0, 0.2), vec3(0.0, 1.0, 0.0), t * 2.0);
 		else heat = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), (t - 0.5) * 2.0);
 		COLOR = vec4(heat, 1.0);
 	} else if (debug_mode == 2) {
-		float t = clamp(total / (body_threshold * 1.5), 0.0, 1.0);
+		float t = clamp(total_water / (body_threshold * 1.5), 0.0, 1.0);
 		vec3 heat = t < 0.5 ? mix(vec3(0.0, 0.0, 0.2), vec3(0.0, 1.0, 0.0), t * 2.0)
 			: mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), (t - 0.5) * 2.0);
 		COLOR = vec4(heat, 1.0);
-	} else {
-		float edge_width = fwidth(total) * 1.5;
-		float aa = smoothstep(2.5 - edge_width, 2.5 + edge_width, total);
+	} else if (total_water > 0.01) {
+		float edge_width = fwidth(total_water) * 1.5;
+		float aa = smoothstep(2.5 - edge_width, 2.5 + edge_width, total_water);
 		if (aa < 0.001) discard;
 
-		float n = total * field_scale;
+		float n = total_water * field_scale;
 
 		// Toon quantization: map continuous n to discrete levels
 		if (toon_levels > 0.5) {
 			n = floor(n * toon_levels) / toon_levels;
 		}
 
-		float rim = smoothstep(2.5, 4.0, total);
+		float rim = smoothstep(2.5, 4.0, total_water);
 		vec3 rim_color = mix(water_foam, water_bright, rim);
 
 		vec3 color;
@@ -437,7 +510,7 @@ void fragment() {
 			color = mix(water_bright, water_light, smoothstep(0.05, 0.3, n));
 		}
 
-		float rim_blend = 1.0 - smoothstep(3.0, 6.0, total);
+		float rim_blend = 1.0 - smoothstep(3.0, 6.0, total_water);
 		color = mix(color, rim_color, rim_blend * 0.7);
 
 		vec2 p1 = UV * 25.0 + time * 2.3;
@@ -449,20 +522,17 @@ void fragment() {
 		color = mix(color, color * 0.92 + 0.04, noise * 0.20);
 
 		float foam = 0.0;
-		float speed_mag = length(avg_vel);
-		foam = smoothstep(0.06, 0.20, speed_mag) * 0.8;
 		foam *= smoothstep(0.03, 0.15, n);
 		foam *= (0.5 + noise * 0.5);
 		foam = clamp(foam, 0.0, 1.0);
 
 		color = mix(color, water_foam, foam);
 
-		// Velocity-driven specular: faster flow = brighter
-		float vel_mag = length(avg_vel);
-		float spec = smoothstep(0.005, 0.06, vel_mag);
-		spec *= (0.4 + 0.6 * pow(max(dot(normalize(avg_vel + vec2(0.0001)), vec2(0.35, -0.6)), 0.0), 2.0));
-		color = mix(color, water_spec, spec * spec_strength);
+		// Velocity-driven specular (disabled: velocity data no longer in output texture)
+		// TODO: re-implement with field gradient or separate velocity texture
 
 		COLOR = vec4(clamp(color, 0.0, 1.0), aa);
+	} else {
+		discard;
 	}
 }

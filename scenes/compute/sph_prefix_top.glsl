@@ -46,6 +46,14 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float fluid_particle_mass;
     float body_drag_gas;
     float target_density;
+    vec4 ptype_stiffness;
+    vec4 ptype_buoyancy;
+    vec4 ptype_viscosity;
+    vec4 ptype_vorticity;
+    vec4 ptype_diffusion;
+    vec4 ptype_cooling;
+    vec4 ptype_init_temp;
+    vec4 ptype_lifetime;
 };
 
 void main() {

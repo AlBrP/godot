@@ -86,6 +86,14 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float fluid_particle_mass;
     float body_drag_gas;
     float target_density;
+    vec4 ptype_stiffness;
+    vec4 ptype_buoyancy;
+    vec4 ptype_viscosity;
+    vec4 ptype_vorticity;
+    vec4 ptype_diffusion;
+    vec4 ptype_cooling;
+    vec4 ptype_init_temp;
+    vec4 ptype_lifetime;
 };
 
 float spiky_pow2_deriv_scale;
@@ -141,12 +149,10 @@ vec2 sampleSdfNormal(vec2 localPos, int bodyIdx) {
 }
 
 float pressure_from_density(float density) {
-    if (sim_mode == 1) return density * gas_stiffness;
     return (density - target_density) * pressure_multiplier;
 }
 
 float near_pressure_from_density(float near_density) {
-    if (sim_mode == 1) return near_density * gas_stiffness * 0.1;
     return near_pressure_multiplier * near_density;
 }
 
@@ -155,6 +161,12 @@ int pred_offset(int i) { return particle_count * 4 + i * 2; }
 int density_offset(int i) { return particle_count * 6 + i; }
 int near_density_offset(int i) { return particle_count * 7 + i; }
 int temperature_offset(int i) { return particle_count * 8 + i; }
+int type_offset(int i) { return particle_count * 10 + i; }
+
+#define PTYPE_WATER  0
+#define PTYPE_FIRE   1
+#define PTYPE_SMOKE  2
+#define PTYPE_STEAM  3
 
 const int HASH_K1 = 15823;
 const int HASH_K2 = 9737333;
@@ -184,12 +196,13 @@ void main() {
 
     int vi = vel_offset(idxi);
     vec2 my_vel = vec2(particle_data[vi], particle_data[vi + 1]);
-    float my_temp = sim_mode >= 1 ? particle_data[temperature_offset(idxi)] : 0.0;
+    int my_type = int(particle_data[type_offset(idxi)]);
+    float my_temp = my_type != PTYPE_WATER ? particle_data[temperature_offset(idxi)] : 0.0;
 
     float my_pressure, my_near_pressure;
-    if (sim_mode >= 1) {
+    if (my_type != PTYPE_WATER) {
         float temp_ratio = my_temp / ambient_temperature;
-        float gs = sim_mode == 2 ? gas_stiffness * 0.25 : gas_stiffness;  // fire: very weak pressure for tongue formation
+        float gs = ptype_stiffness[my_type];
         my_pressure = my_density * gs * temp_ratio;
         my_near_pressure = my_near_density * gs * 0.1 * temp_ratio;
     } else {
@@ -227,10 +240,11 @@ void main() {
                 float nb_near_density = particle_data[near_density_offset(int(neighbor_idx))];
                 float nb_pressure, nb_near_pressure;
                 float nb_temp = 0.0;
-                if (sim_mode >= 1) {
+                int nb_type = int(particle_data[type_offset(int(neighbor_idx))]);
+                if (nb_type != PTYPE_WATER) {
                     nb_temp = particle_data[temperature_offset(int(neighbor_idx))];
                     float nb_temp_ratio = nb_temp / ambient_temperature;
-                    float ngs = sim_mode == 2 ? gas_stiffness * 0.25 : gas_stiffness;
+                    float ngs = ptype_stiffness[nb_type];
                     nb_pressure = nb_density * ngs * nb_temp_ratio;
                     nb_near_pressure = nb_near_density * ngs * 0.1 * nb_temp_ratio;
                 } else {
@@ -247,7 +261,7 @@ void main() {
                 vec2 other_vel = vec2(particle_data[vn], particle_data[vn + 1]);
                 viscosity_force += (other_vel - my_vel) * poly6_kernel(dist);
 
-                if (sim_mode >= 1) {
+                if (my_type != PTYPE_WATER) {
                     temp_delta += (nb_temp - my_temp) * poly6_kernel(dist);
                     float dvx = other_vel.x - my_vel.x;
                     float dvy = other_vel.y - my_vel.y;
@@ -259,18 +273,17 @@ void main() {
     }
 
     vec2 acceleration = pressure_force / my_density;
-    float visc_mult = sim_mode >= 1 ? gas_viscosity_ratio : 1.0;
+    float visc_mult = ptype_viscosity[my_type];
     particle_data[vi] += acceleration.x * sub_dt + viscosity_force.x * viscosity_strength * visc_mult * sub_dt;
     particle_data[vi + 1] += acceleration.y * sub_dt + viscosity_force.y * viscosity_strength * visc_mult * sub_dt;
 
-    // Vorticity confinement + temperature diffusion (smoke/fire mode)
-    if (sim_mode >= 1) {
-        particle_data[temperature_offset(idxi)] += temp_diffusion_rate * temp_delta * sub_dt;
+    // Vorticity confinement + temperature diffusion (gas types only)
+    if (my_type != PTYPE_WATER) {
+        particle_data[temperature_offset(idxi)] += ptype_diffusion[my_type] * temp_delta * sub_dt;
         float omega = abs(my_curl);
         if (omega > 0.0001) {
             vec2 n = normalize(my_vel + vec2(0.001));
-            // Fire: moderate vorticity (reduced from 1.6 to keep column shape)
-            float vort_str = vorticity_epsilon * (sim_mode == 2 ? 1.0 : 1.0);
+            float vort_str = ptype_vorticity[my_type];
             vec2 vort_force = vec2(-n.y, n.x) * omega * vort_str;
             particle_data[vi] += vort_force.x * sub_dt;
             particle_data[vi + 1] += vort_force.y * sub_dt;

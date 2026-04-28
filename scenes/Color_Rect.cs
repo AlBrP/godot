@@ -14,6 +14,7 @@ public partial class Color_Rect : ColorRect
 
 	private Texture2Drd gpu_position_tex_;
 	private Texture2Drd gpu_hashlookup_tex_;
+	private Texture2Drd gpu_physics_tex_;
 
 	private int debug_mode_ = 0;
 
@@ -42,6 +43,15 @@ public partial class Color_Rect : ColorRect
 		{
 			shaderMaterial.SetShaderParameter("raw_position_texture", gpu_position_tex_);
 			shaderMaterial.SetShaderParameter("hash_lookup_texture", gpu_hashlookup_tex_);
+		}
+	}
+
+	public void SetGpuPhysicsTexture(Texture2Drd physTex)
+	{
+		gpu_physics_tex_ = physTex;
+		if (Material is ShaderMaterial shaderMaterial)
+		{
+			shaderMaterial.SetShaderParameter("physics_texture", gpu_physics_tex_);
 		}
 	}
 
@@ -74,7 +84,6 @@ public partial class Color_Rect : ColorRect
 
 		shaderMaterial.SetShaderParameter("grid_cell_size", (double)ground_.smoothing_radius);
 		shaderMaterial.SetShaderParameter("ground_offset", ground_.Position);
-		shaderMaterial.SetShaderParameter("sim_mode", ground_.FireMode ? 2 : (ground_.SmokeMode ? 1 : 0));
 		shaderMaterial.SetShaderParameter("debug_mode", ground_.DebugModeVal);
 	}
 

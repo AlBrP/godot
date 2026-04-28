@@ -97,6 +97,7 @@ public partial class Ground : StaticBody2D
 	public bool FireMode => fire_mode_;
 	[Export] public float fire_temperature { get; set; } = 1500f;
 	private float[] smoke_temp_ = new float[ball_nums_];
+	private int[] particle_types_ = new int[ball_nums_];
 
 	private int body_count_ = 0;
 	private int current_body_ = 0;
@@ -140,6 +141,7 @@ public partial class Ground : StaticBody2D
 		sph_gpu_ = new SphGpu();
 		sph_gpu_.Init();
 		colorRect_.SetGpuTextures(sph_gpu_.PositionTex, sph_gpu_.HashLookupTex);
+		colorRect_.SetGpuPhysicsTexture(sph_gpu_.PhysicsTex);
 		SetParticleSpritesVisible(false);
 		colorRect_.SetGpuMode(true);
 		sph_gpu_.ResetParticles(pos_, vel_, Position);
@@ -330,12 +332,14 @@ public partial class Ground : StaticBody2D
 			{
 				pos_[i] = new Vector2(-1000f, -1000f); vel_[i] = Vector2.Zero;
 				smoke_temp_[i] = 0f;
+				particle_types_[i] = 0;
 			}
 			else
 			{
 				float x = (i % rows - rows / 2f + 0.5f) * spacing + ox;
 				float y = (i / rows - cols / 2f + 0.5f) * spacing + oy;
 				pos_[i] = new Vector2(x, y); vel_[i] = Vector2.Zero;
+				particle_types_[i] = 0;
 			}
 		}
 		spawn_index_ = 0; last_synced_spawn_ = 0;
@@ -360,10 +364,12 @@ public partial class Ground : StaticBody2D
 				float py = BitConverter.ToSingle(gpuData, i * 8 + 4);
 				pos_[i] = new Vector2(px, py);
 				particle_sprites_[i].Position = Position + pos_[i];
-				// Color by temperature
-				float temp = BitConverter.ToSingle(gpuData, ball_nums_ * 32 + i * 4);
-				float tn = Mathf.Clamp(temp / 1000f, 0f, 1f);
-				particle_sprites_[i].Modulate = new Color(1f, 0.5f * (1f - tn) + 0.1f, tn * 0.3f, 0.8f);
+				// Color by type: water=blue, fire=red, smoke=gray, steam=white
+				int ptype = BitConverter.ToInt32(gpuData, ball_nums_ * 40 + i * 4);
+				if (ptype == 1) particle_sprites_[i].Modulate = new Color(1f, 0.3f, 0.05f, 0.8f);
+				else if (ptype == 2) particle_sprites_[i].Modulate = new Color(0.6f, 0.6f, 0.6f, 0.8f);
+				else if (ptype == 3) particle_sprites_[i].Modulate = new Color(0.9f, 0.9f, 1f, 0.8f);
+				else particle_sprites_[i].Modulate = new Color(0.2f, 0.5f, 1f, 0.8f);
 			}
 			SetParticleSpritesVisible(true);
 			colorRect_.Visible = false;
@@ -424,6 +430,7 @@ public partial class Ground : StaticBody2D
 					var spawnOffset = new Vector2(offset_x + (float)(GD.Randf() - 0.5) * 4f, 40f + (float)(GD.Randf() - 0.5) * 4f);
 					pos_[idx] = mouse_position_ + spawnOffset;
 					smoke_temp_[idx] = jet_temp[j];
+					particle_types_[idx] = 1; // PTYPE_FIRE
 				}
 			}
 		}
@@ -444,6 +451,7 @@ public partial class Ground : StaticBody2D
 					(float)(GD.Randf() - 0.5) * 30f
 				);
 				smoke_temp_[idx] = initTemp;
+				particle_types_[idx] = 2; // PTYPE_SMOKE
 			}
 		}
 		else if (spray_mode_ && mouse_pressed_)
@@ -459,6 +467,7 @@ public partial class Ground : StaticBody2D
 				vel_[idx] = vel;
 				float along = (float)GD.RandRange(50f, 110f);
 				pos_[idx] = mouse_position_ + vel.Normalized() * along;
+				particle_types_[idx] = 0; // PTYPE_WATER
 			}
 		}
 
@@ -480,24 +489,15 @@ public partial class Ground : StaticBody2D
 			if (cur > last)
 			{
 				int count = cur - last;
-				if (smoke_mode_ || fire_mode_) sph_gpu_.UpdateParticlesBatchWithTemp(last, pos_, vel_, smoke_temp_, count);
-				else sph_gpu_.UpdateParticlesBatch(last, pos_, vel_, count);
+				sph_gpu_.UpdateParticlesBatchWithType(last, pos_, vel_, smoke_temp_, particle_types_, count);
 			}
 			else if (cur < last)
 			{
 				// Wrap-around: sync tail then head
 				int count1 = ball_nums_ - last;
 				int count2 = cur;
-				if (smoke_mode_ || fire_mode_)
-				{
-					sph_gpu_.UpdateParticlesBatchWithTemp(last, pos_, vel_, smoke_temp_, count1);
-					sph_gpu_.UpdateParticlesBatchWithTemp(0, pos_, vel_, smoke_temp_, count2);
-				}
-				else
-				{
-					sph_gpu_.UpdateParticlesBatch(last, pos_, vel_, count1);
-					sph_gpu_.UpdateParticlesBatch(0, pos_, vel_, count2);
-				}
+				sph_gpu_.UpdateParticlesBatchWithType(last, pos_, vel_, smoke_temp_, particle_types_, count1);
+				sph_gpu_.UpdateParticlesBatchWithType(0, pos_, vel_, smoke_temp_, particle_types_, count2);
 			}
 			last_synced_spawn_ = spawn_index_;
 		}
@@ -570,7 +570,23 @@ public partial class Ground : StaticBody2D
 			vorticity_epsilon, temp_diffusion_rate,
 			(fire_mode_ ? particle_lifetime * 0.3f : particle_lifetime), ambient_temperature,
 			cooling_rate, gas_viscosity_ratio,
-			body_drag_gas);
+			body_drag_gas,
+			// ptype_stiffness: [water=0, fire=0.75, smoke=3.0, steam=3.0]
+			0f, gas_stiffness * 0.25f, gas_stiffness, gas_stiffness,
+			// ptype_buoyancy: [water=0, fire=0.14, smoke=0.2, steam=0.2]
+			0f, buoyancy_alpha * 0.7f, buoyancy_alpha, buoyancy_alpha,
+			// ptype_viscosity: [water=1.0, fire=0.1, smoke=0.1, steam=0.1]
+			1.0f, gas_viscosity_ratio, gas_viscosity_ratio, gas_viscosity_ratio,
+			// ptype_vorticity: [water=0, fire=50, smoke=50, steam=50]
+			0f, vorticity_epsilon, vorticity_epsilon, vorticity_epsilon,
+			// ptype_diffusion: [water=0, fire=2, smoke=2, steam=2]
+			0f, temp_diffusion_rate, temp_diffusion_rate, temp_diffusion_rate,
+			// ptype_cooling: [water=0, fire=2700, smoke=180, steam=180]
+			0f, cooling_rate * 15f, cooling_rate, cooling_rate,
+			// ptype_init_temp: [water=0, fire=1500, smoke=800, steam=500]
+			0f, fire_temperature, 800f, 500f,
+			// ptype_lifetime: [water=99999, fire=0.75, smoke=2.5, steam=2.0]
+			99999f, particle_lifetime * 0.3f, particle_lifetime, 2.0f);
 		sph_gpu_.DispatchFrame(frameDt, iterations_per_frame);
 	}
 

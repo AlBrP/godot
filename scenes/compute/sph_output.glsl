@@ -56,10 +56,19 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float fluid_particle_mass;
     float body_drag_gas;
     float target_density;
+    vec4 ptype_stiffness;
+    vec4 ptype_buoyancy;
+    vec4 ptype_viscosity;
+    vec4 ptype_vorticity;
+    vec4 ptype_diffusion;
+    vec4 ptype_cooling;
+    vec4 ptype_init_temp;
+    vec4 ptype_lifetime;
 };
 
 layout(set = 1, binding = 0, rgba16f) uniform image2D position_tex;
 layout(set = 1, binding = 1, rg32f) uniform image2D hashlookup_tex;
+layout(set = 1, binding = 2, rgba16f) uniform image2D physics_tex;
 
 const int TEX_W = 72;
 const int TEX_H = 70;
@@ -68,6 +77,12 @@ const int TOTAL_PIXELS = TEX_W * TEX_H;
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
 int density_offset(int i) { return particle_count * 6 + i; }
 int temperature_offset(int i) { return particle_count * 8 + i; }
+int type_offset(int i) { return particle_count * 10 + i; }
+
+#define PTYPE_WATER  0
+#define PTYPE_FIRE   1
+#define PTYPE_SMOKE  2
+#define PTYPE_STEAM  3
 
 void main() {
     uint j = gl_GlobalInvocationID.x;
@@ -79,21 +94,47 @@ void main() {
         uint pidx = sorted_indices[j];
         vec2 p = vec2(particle_data[pidx * 2], particle_data[pidx * 2 + 1]);
         vec2 world_pos = p + ground_offset;
-        int vi = vel_offset(int(pidx));
-        vec2 v = vec2(particle_data[vi], particle_data[vi + 1]);
-        float vn_x = clamp(v.x / max_vel * 0.5 + 0.5, 0.0, 1.0);
-        float vn_y = clamp(v.y / max_vel * 0.5 + 0.5, 0.0, 1.0);
-        if (sim_mode >= 1) {
+        int my_type = int(particle_data[type_offset(int(pidx))]);
+        float type_encoded = float(my_type) / 16.0;
+
+        float extra = 0.0;
+        if (my_type != PTYPE_WATER) {
             float temp = particle_data[temperature_offset(int(pidx))];
-            float temp_scale = sim_mode == 2 ? 1500.0 : 1000.0;
-            float tn = clamp(temp / temp_scale, 0.0, 1.0);
-            int vi = vel_offset(int(pidx));
-            float vx = particle_data[vi];
-            float vn_x = clamp(vx / max_vel * 0.5 + 0.5, 0.0, 1.0);
-            imageStore(position_tex, tex_coord, vec4(world_pos, tn, vn_x));
+            float init_temp = ptype_init_temp[my_type];
+            extra = clamp(temp / max(init_temp, 1.0), 0.0, 1.0);
         } else {
-            imageStore(position_tex, tex_coord, vec4(world_pos, vn_x, vn_y));
+            float density_val = particle_data[density_offset(int(pidx))];
+            extra = clamp(density_val * 0.05, 0.0, 1.0);
         }
+        imageStore(position_tex, tex_coord, vec4(world_pos, type_encoded, extra));
+
+        // -- Physics data: velocity, curl proxy, pressure --
+        vec2 vel_out = vec2(0.0);
+        float curl_out = 0.0;
+        float pressure_out = 0.0;
+
+        if (my_type != PTYPE_WATER) {
+            int vi = vel_offset(int(pidx));
+            vel_out = vec2(particle_data[vi], particle_data[vi + 1]);
+
+            float dens = particle_data[density_offset(int(pidx))];
+            float temp = particle_data[temperature_offset(int(pidx))];
+
+            // Gas pressure: density * stiffness * (T / T_ambient)
+            float gs = ptype_stiffness[my_type];
+            pressure_out = dens * gs * (temp / max(ambient_temperature, 1.0));
+
+            // Curl proxy: velocity magnitude * temperature ratio
+            curl_out = length(vel_out) * (temp / max(ambient_temperature, 1.0));
+        } else {
+            int vi_w = vel_offset(int(pidx));
+            vel_out = vec2(particle_data[vi_w], particle_data[vi_w + 1]);
+            float dens_w = particle_data[density_offset(int(pidx))];
+            pressure_out = max(dens_w - target_density, 0.0) * pressure_multiplier;
+            curl_out = 0.0;
+        }
+
+        imageStore(physics_tex, tex_coord, vec4(vel_out, curl_out, pressure_out));
 
         int start = ht_start[int(j)];
         int end = ht_end[int(j)];
@@ -105,5 +146,6 @@ void main() {
     } else {
         imageStore(position_tex, tex_coord, vec4(0.0, 0.0, 0.0, 0.0));
         imageStore(hashlookup_tex, tex_coord, vec4(-1.0, -1.0, 0.0, 0.0));
+        imageStore(physics_tex, tex_coord, vec4(0.0, 0.0, 0.0, 0.0));
     }
 }

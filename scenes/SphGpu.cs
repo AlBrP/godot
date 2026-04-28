@@ -37,9 +37,11 @@ public class SphGpu
 	private Rid position_tex_rid;
 	private Rid hashlookup_tex_rid;
 	private Rid smoke_tex_rid;
+	private Rid physics_tex_rid;
 	public Texture2Drd PositionTex { get; private set; }
 	public Texture2Drd HashLookupTex { get; private set; }
 	public Texture2Drd SmokeTex { get; private set; }
+	public Texture2Drd PhysicsTex { get; private set; }
 
 	// Shader + Pipeline RIDs
 	private Rid shader_forces_hash;
@@ -77,14 +79,14 @@ public class SphGpu
 	private Rid uniform_set_output_1;
 
 	// Buffer sizes
-	private const int PARTICLE_BUF_SIZE = N * (8 + 8 + 8 + 4 + 4 + 4 + 4);
+	private const int PARTICLE_BUF_SIZE = N * (8 + 8 + 8 + 4 + 4 + 4 + 4 + 4); // stride=11 floats
 	private const int HASH_BUF_SIZE = N * (4 + 8);
 	private const int SORT_BUF_SIZE = N * (4 + 4);
 	private const int HASHTABLE_BUF_SIZE = N * (4 + 4);
 	private const int HISTOGRAM_BUF_SIZE = N * 4;
 	private const int PREFIX_BUF_SIZE = N * 4;
 	private const int BLOCK_SUMS_BUF_SIZE = NUM_GROUPS * 4;
-	private const int PARAMS_BUF_SIZE = 160;
+	private const int PARAMS_BUF_SIZE = 288;
 
 	public void Init()
 	{
@@ -136,6 +138,14 @@ public class SphGpu
 		smoke_tex_rid = RD.TextureCreate(smokeFmt, defaultView);
 		SmokeTex = new Texture2Drd();
 		SmokeTex.TextureRdRid = smoke_tex_rid;
+
+		var physFmt = new RDTextureFormat();
+		physFmt.Width = TEX_W; physFmt.Height = TEX_H;
+		physFmt.Format = RenderingDevice.DataFormat.R16G16B16A16Sfloat;
+		physFmt.UsageBits = RenderingDevice.TextureUsageBits.StorageBit | RenderingDevice.TextureUsageBits.SamplingBit;
+		physics_tex_rid = RD.TextureCreate(physFmt, defaultView);
+		PhysicsTex = new Texture2Drd();
+		PhysicsTex.TextureRdRid = physics_tex_rid;
 
 		force_accum_buf = RD.StorageBufferCreate(FORCE_ACCUM_SIZE, new byte[FORCE_ACCUM_SIZE]);
 		sdf_buf = RD.StorageBufferCreate(SDF_BUF_SIZE, new byte[SDF_BUF_SIZE]);
@@ -264,6 +274,7 @@ public class SphGpu
 		});
 		uniform_set_output_1 = MakeUniformSet(shader_output, 1, new Godot.Collections.Array<RDUniform> {
 			MakeImageUniform(0, position_tex_rid), MakeImageUniform(1, hashlookup_tex_rid),
+			MakeImageUniform(2, physics_tex_rid),
 		});
 	}
 
@@ -327,47 +338,74 @@ public class SphGpu
 		float vorticityEpsilon = 0f, float tempDiffusionRate = 0f,
 		float particleLifetime = 0f, float ambientTemperature = 0f,
 		float coolingRate = 0f, float gasViscosityRatio = 0f,
-		float bodyDragGas = 0f)
+		float bodyDragGas = 0f,
+		// ptype parameter tables (4 floats each: water, fire, smoke, steam)
+		float pStiffW = 0f, float pStiffF = 0f, float pStiffS = 0f, float pStiffSt = 0f,
+		float pBuoyW = 0f, float pBuoyF = 0f, float pBuoyS = 0f, float pBuoySt = 0f,
+		float pViscW = 0f, float pViscF = 0f, float pViscS = 0f, float pViscSt = 0f,
+		float pVortW = 0f, float pVortF = 0f, float pVortS = 0f, float pVortSt = 0f,
+		float pDiffW = 0f, float pDiffF = 0f, float pDiffS = 0f, float pDiffSt = 0f,
+		float pCoolW = 0f, float pCoolF = 0f, float pCoolS = 0f, float pCoolSt = 0f,
+		float pTempW = 0f, float pTempF = 0f, float pTempS = 0f, float pTempSt = 0f,
+		float pLifeW = 0f, float pLifeF = 0f, float pLifeS = 0f, float pLifeSt = 0f)
 	{
 		byte[] data = new byte[PARAMS_BUF_SIZE];
 		int offset = 0;
+		// --- Original 160 bytes (offsets unchanged) ---
 		WriteVec2(data, ref offset, boundsMin);       // 0
-		WriteVec2(data, ref offset, boundsMax);         // 8
-		WriteVec2(data, ref offset, mousePos);         // 16
-		WriteFloat(data, ref offset, dt);               // 24
-		WriteFloat(data, ref offset, subDt);            // 28
-		WriteFloat(data, ref offset, gravity);          // 32
+		WriteVec2(data, ref offset, boundsMax);       // 8
+		WriteVec2(data, ref offset, mousePos);        // 16
+		WriteFloat(data, ref offset, dt);              // 24
+		WriteFloat(data, ref offset, subDt);           // 28
+		WriteFloat(data, ref offset, gravity);         // 32
 		WriteFloat(data, ref offset, velocityDamping);  // 36
 		WriteFloat(data, ref offset, smoothingRadius);  // 40
 		WriteFloat(data, ref offset, smoothingRadius * smoothingRadius); // 44
 		WriteFloat(data, ref offset, 1f / smoothingRadius); // 48
 		WriteFloat(data, ref offset, pressureMultiplier);   // 52
 		WriteFloat(data, ref offset, nearPressureMultiplier); // 56
-		WriteFloat(data, ref offset, viscosityStrength);     // 60
-		WriteFloat(data, ref offset, collisionDamping);      // 64
-		WriteFloat(data, ref offset, predictionFactor);      // 68
-		WriteFloat(data, ref offset, maxVel);                // 72
-		WriteFloat(data, ref offset, mouseRadiusGrab);      // 76
-		WriteFloat(data, ref offset, mouseRadiusStick);     // 80
-		WriteFloat(data, ref offset, grabSpeed);            // 84
-		WriteInt(data, ref offset, N);                      // 88
-		WriteInt(data, ref offset, mousePressed ? 1 : 0);   // 92
-		WriteVec2(data, ref offset, groundOffset);           // 96
-		WriteInt(data, ref offset, sprayMode ? 1 : 0);      // 104
-		WriteInt(data, ref offset, simMode);                 // 108
-		WriteFloat(data, ref offset, gasStiffness);          // 112
-		WriteFloat(data, ref offset, buoyancyAlpha);         // 116
-		WriteFloat(data, ref offset, vorticityEpsilon);      // 120
-		WriteFloat(data, ref offset, tempDiffusionRate);     // 124
-		WriteInt(data, ref offset, bodyCount);               // 128
-		WriteFloat(data, ref offset, particleLifetime);       // 132
-		WriteFloat(data, ref offset, ambientTemperature);     // 136
-		WriteFloat(data, ref offset, coolingRate);            // 140
-		WriteFloat(data, ref offset, gasViscosityRatio);      // 144
-		WriteFloat(data, ref offset, fluidParticleMass);     // 148
-		WriteFloat(data, ref offset, bodyDragGas);            // 152
-		WriteFloat(data, ref offset, targetDensity);          // 156
-		// Total: 160 bytes
+		WriteFloat(data, ref offset, viscosityStrength);    // 60
+		WriteFloat(data, ref offset, collisionDamping);    // 64
+		WriteFloat(data, ref offset, predictionFactor);    // 68
+		WriteFloat(data, ref offset, maxVel);              // 72
+		WriteFloat(data, ref offset, mouseRadiusGrab);    // 76
+		WriteFloat(data, ref offset, mouseRadiusStick);   // 80
+		WriteFloat(data, ref offset, grabSpeed);          // 84
+		WriteInt(data, ref offset, N);                    // 88
+		WriteInt(data, ref offset, mousePressed ? 1 : 0); // 92
+		WriteVec2(data, ref offset, groundOffset);        // 96
+		WriteInt(data, ref offset, sprayMode ? 1 : 0);   // 104
+		WriteInt(data, ref offset, simMode);              // 108
+		WriteFloat(data, ref offset, gasStiffness);       // 112
+		WriteFloat(data, ref offset, buoyancyAlpha);     // 116
+		WriteFloat(data, ref offset, vorticityEpsilon);   // 120
+		WriteFloat(data, ref offset, tempDiffusionRate);  // 124
+		WriteInt(data, ref offset, bodyCount);            // 128
+		WriteFloat(data, ref offset, particleLifetime);   // 132
+		WriteFloat(data, ref offset, ambientTemperature); // 136
+		WriteFloat(data, ref offset, coolingRate);        // 140
+		WriteFloat(data, ref offset, gasViscosityRatio);   // 144
+		WriteFloat(data, ref offset, fluidParticleMass);  // 148
+		WriteFloat(data, ref offset, bodyDragGas);        // 152
+		WriteFloat(data, ref offset, targetDensity);      // 156
+		// --- ptype tables appended at offset 160 (8 x vec4 = 128 bytes) ---
+		WriteFloat(data, ref offset, pStiffW);  WriteFloat(data, ref offset, pStiffF);
+		WriteFloat(data, ref offset, pStiffS);  WriteFloat(data, ref offset, pStiffSt);  // 160
+		WriteFloat(data, ref offset, pBuoyW);   WriteFloat(data, ref offset, pBuoyF);
+		WriteFloat(data, ref offset, pBuoyS);   WriteFloat(data, ref offset, pBuoySt);   // 176
+		WriteFloat(data, ref offset, pViscW);   WriteFloat(data, ref offset, pViscF);
+		WriteFloat(data, ref offset, pViscS);   WriteFloat(data, ref offset, pViscSt);   // 192
+		WriteFloat(data, ref offset, pVortW);   WriteFloat(data, ref offset, pVortF);
+		WriteFloat(data, ref offset, pVortS);   WriteFloat(data, ref offset, pVortSt);   // 208
+		WriteFloat(data, ref offset, pDiffW);   WriteFloat(data, ref offset, pDiffF);
+		WriteFloat(data, ref offset, pDiffS);   WriteFloat(data, ref offset, pDiffSt);   // 224
+		WriteFloat(data, ref offset, pCoolW);   WriteFloat(data, ref offset, pCoolF);
+		WriteFloat(data, ref offset, pCoolS);   WriteFloat(data, ref offset, pCoolSt);   // 240
+		WriteFloat(data, ref offset, pTempW);    WriteFloat(data, ref offset, pTempF);
+		WriteFloat(data, ref offset, pTempS);    WriteFloat(data, ref offset, pTempSt);  // 256
+		WriteFloat(data, ref offset, pLifeW);    WriteFloat(data, ref offset, pLifeF);
+		WriteFloat(data, ref offset, pLifeS);    WriteFloat(data, ref offset, pLifeSt);   // 272
+		// Total: 288 bytes
 		RD.BufferUpdate(params_ubuf, 0, PARAMS_BUF_SIZE, data);
 	}
 
@@ -456,8 +494,9 @@ public class SphGpu
 			posVelData[voff + 4] = vyb[0]; posVelData[voff + 5] = vyb[1]; posVelData[voff + 6] = vyb[2]; posVelData[voff + 7] = vyb[3];
 		}
 		RD.BufferUpdate(particle_buf, 0, N * 16, posVelData);
-		RD.BufferClear(particle_buf, (uint)(N * 16), (uint)(N * 16));
-		RD.BufferClear(particle_buf, (uint)(N * 32), (uint)(N * 8));
+		RD.BufferClear(particle_buf, (uint)(N * 16), (uint)(N * 16));  // pred + density + near_density
+		RD.BufferClear(particle_buf, (uint)(N * 32), (uint)(N * 8));   // temp + age
+		RD.BufferClear(particle_buf, (uint)(N * 40), (uint)(N * 4));   // type
 	}
 
 	public byte[] ReadBackParticleBuffer()
@@ -539,9 +578,34 @@ public class SphGpu
 		RD.BufferUpdate(particle_buf, (uint)(N * 32 + startIndex * 4), (uint)tempData.Length, tempData);
 	}
 
+	public void UpdateParticlesBatchWithType(int startIndex, Vector2[] positions, Vector2[] velocities,
+	                                          float[] temperatures, int[] types, int count)
+	{
+		byte[] posData = new byte[count * 8], velData = new byte[count * 8];
+		byte[] tempData = new byte[count * 4], typeData = new byte[count * 4];
+		for (int i = 0; i < count; i++)
+		{
+			int idx = startIndex + i, off = i * 8, toff = i * 4;
+			byte[] xb = BitConverter.GetBytes(positions[idx].X), yb = BitConverter.GetBytes(positions[idx].Y);
+			posData[off + 0] = xb[0]; posData[off + 1] = xb[1]; posData[off + 2] = xb[2]; posData[off + 3] = xb[3];
+			posData[off + 4] = yb[0]; posData[off + 5] = yb[1]; posData[off + 6] = yb[2]; posData[off + 7] = yb[3];
+			byte[] vxb = BitConverter.GetBytes(velocities[idx].X), vyb = BitConverter.GetBytes(velocities[idx].Y);
+			velData[off + 0] = vxb[0]; velData[off + 1] = vxb[1]; velData[off + 2] = vxb[2]; velData[off + 3] = vxb[3];
+			velData[off + 4] = vyb[0]; velData[off + 5] = vyb[1]; velData[off + 6] = vyb[2]; velData[off + 7] = vyb[3];
+			byte[] tb = BitConverter.GetBytes(temperatures[idx]);
+			tempData[toff + 0] = tb[0]; tempData[toff + 1] = tb[1]; tempData[toff + 2] = tb[2]; tempData[toff + 3] = tb[3];
+			byte[] yp = BitConverter.GetBytes((float)types[idx]);
+			typeData[toff + 0] = yp[0]; typeData[toff + 1] = yp[1]; typeData[toff + 2] = yp[2]; typeData[toff + 3] = yp[3];
+		}
+		RD.BufferUpdate(particle_buf, (uint)(startIndex * 8), (uint)posData.Length, posData);
+		RD.BufferUpdate(particle_buf, (uint)(N * 8 + startIndex * 8), (uint)velData.Length, velData);
+		RD.BufferUpdate(particle_buf, (uint)(N * 32 + startIndex * 4), (uint)tempData.Length, tempData);
+		RD.BufferUpdate(particle_buf, (uint)(N * 40 + startIndex * 4), (uint)typeData.Length, typeData);
+	}
+
 	public void Free()
 	{
-		RD.FreeRid(position_tex_rid); RD.FreeRid(hashlookup_tex_rid); RD.FreeRid(smoke_tex_rid);
+		RD.FreeRid(position_tex_rid); RD.FreeRid(hashlookup_tex_rid); RD.FreeRid(smoke_tex_rid); RD.FreeRid(physics_tex_rid);
 		RD.FreeRid(force_accum_buf); RD.FreeRid(sdf_buf); RD.FreeRid(body_data_buf);
 		RD.FreeRid(particle_buf); RD.FreeRid(hash_buf); RD.FreeRid(sort_buf);
 		RD.FreeRid(hashtable_buf); RD.FreeRid(histogram_buf); RD.FreeRid(prefix_buf);

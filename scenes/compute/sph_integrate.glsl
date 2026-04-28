@@ -63,10 +63,24 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float fluid_particle_mass;
     float body_drag_gas;
     float target_density;
+    vec4 ptype_stiffness;
+    vec4 ptype_buoyancy;
+    vec4 ptype_viscosity;
+    vec4 ptype_vorticity;
+    vec4 ptype_diffusion;
+    vec4 ptype_cooling;
+    vec4 ptype_init_temp;
+    vec4 ptype_lifetime;
 };
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
 int age_offset(int i) { return particle_count * 9 + i; }
+int type_offset(int i) { return particle_count * 10 + i; }
+
+#define PTYPE_WATER  0
+#define PTYPE_FIRE   1
+#define PTYPE_SMOKE  2
+#define PTYPE_STEAM  3
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -82,6 +96,8 @@ void main() {
 
     p += v * sub_dt;
 
+    int my_type = int(particle_data[type_offset(i)]);
+
     // Light sphere safety push-out for all active bodies
     for (int b = 0; b < body_count; b++) {
         if (bodies[b].enabled == 0) continue;
@@ -91,12 +107,12 @@ void main() {
         if (dist < sr && dist > 0.0001) {
             float penetration = sr - dist;
             vec2 normal = diff / dist;
-            float push_strength = sim_mode == 1 ? 0.1 : 1.0;
+            float push_strength = my_type != PTYPE_WATER ? 0.1 : 1.0;
             p += normal * penetration * push_strength;
             vec2 rel_v = v - bodies[b].vel;
             float vn = dot(rel_v, normal);
             if (vn < 0.0)
-                v = bodies[b].vel + reflect(rel_v, normal) * (sim_mode == 1 ? 0.2 : collision_damping);
+                v = bodies[b].vel + reflect(rel_v, normal) * (my_type != PTYPE_WATER ? 0.2 : collision_damping);
         }
     }
 
@@ -106,11 +122,12 @@ void main() {
     if (p.y < bounds_min.y) { p.y = bounds_min.y; v.y *= -collision_damping; }
     else if (p.y > bounds_max.y) { p.y = bounds_max.y; v.y *= -collision_damping; }
 
-    // Smoke/fire particle lifecycle
-    if (sim_mode >= 1) {
+    // Gas particle lifecycle
+    if (my_type != PTYPE_WATER) {
         int ai = age_offset(i);
         particle_data[ai] += sub_dt;
-        if (particle_data[ai] > particle_lifetime) {
+        float lifetime = ptype_lifetime[my_type];
+        if (particle_data[ai] > lifetime) {
             p.y = -600.0;
             v = vec2(0.0);
             particle_data[ai] = 0.0;

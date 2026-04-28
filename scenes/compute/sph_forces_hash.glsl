@@ -51,6 +51,14 @@ layout(set = 0, binding = 7, std140) uniform Params {
     float fluid_particle_mass;
     float body_drag_gas;
     float target_density;
+    vec4 ptype_stiffness;
+    vec4 ptype_buoyancy;
+    vec4 ptype_viscosity;
+    vec4 ptype_vorticity;
+    vec4 ptype_diffusion;
+    vec4 ptype_cooling;
+    vec4 ptype_init_temp;
+    vec4 ptype_lifetime;
 };
 
 const int MAX_BODIES = 4;
@@ -75,6 +83,13 @@ int vel_offset(int i) { return particle_count * 2 + i * 2; }
 int pred_offset(int i) { return particle_count * 4 + i * 2; }
 int temperature_offset(int i) { return particle_count * 8 + i; }
 int age_offset(int i) { return particle_count * 9 + i; }
+int type_offset(int i) { return particle_count * 10 + i; }
+
+#define PTYPE_WATER  0
+#define PTYPE_FIRE   1
+#define PTYPE_SMOKE  2
+#define PTYPE_STEAM  3
+#define PTYPE_COUNT  4
 
 const int HASH_K1 = 15823;
 const int HASH_K2 = 9737333;
@@ -107,46 +122,46 @@ void main() {
         return;
     }
 
-    // Gas/smoke/fire physics: shared formulation, parameterized by init_temp
-    if (sim_mode == 1 || sim_mode == 2) {
+    int my_type = int(particle_data[type_offset(int(i))]);
+
+    // Per-type physics via ptype tables
+    if (my_type != PTYPE_WATER) {
+        // Gas/fire/smoke/steam physics
         int ti = temperature_offset(int(i));
         int ai = age_offset(int(i));
         float my_temp = particle_data[ti];
         float my_age = particle_data[ai];
-        float init_temp = sim_mode == 2 ? 1500.0 : 800.0;
-        float cool_rate = sim_mode == 2 ? cooling_rate * 15.0 : cooling_rate;
+        float init_temp = ptype_init_temp[my_type];
+        float cool_rate = ptype_cooling[my_type];
         // Init temperature for freshly spawned particles
         if (my_age < sub_dt * 3.0) {
             my_temp = init_temp;
             particle_data[ti] = my_temp;
         }
-        // Newton cooling: hot core protected, edges cool fast (flame shape driver)
+        // Newton cooling: hot core protected, edges cool fast
         float core_protection = smoothstep(ambient_temperature, init_temp, my_temp);
         float cool_factor = 1.0 - core_protection * 0.8;
         my_temp -= cool_rate * cool_factor * sub_dt;
         my_temp = max(my_temp, ambient_temperature);
         particle_data[ti] = my_temp;
-        // Boussinesq buoyancy: fire reduced 30%
-        float bf = sim_mode == 2 ? buoyancy_alpha * 0.7 : buoyancy_alpha;
+        // Boussinesq buoyancy
+        float bf = ptype_buoyancy[my_type];
         v.y += gravity * bf * (1.0 - my_temp / ambient_temperature) * sub_dt;
         // Subgrid eddy model (LES)
-        float temp_factor = my_temp / init_temp;
+        float temp_factor = my_temp / max(init_temp, 1.0);
         float eddy_x, eddy_y;
-        if (sim_mode == 2) {
+        if (my_type == PTYPE_FIRE) {
             // Fire: reduced lateral spread for columnar flame shape
             float sway = p.y * 0.031;
             float pid = float(i) * 0.7;
-            // Height-dependent lateral boost: sides peel off at top -> arched tip
             float rise_h = clamp((mouse_pos.y - p.y) / 100.0, 0.0, 1.0);
-            float top_spread = 1.0 + rise_h * 2.5;  // 1x at base, 3.5x at top
-            // Lateral eddy: moderate spread for flame tongue formation
+            float top_spread = 1.0 + rise_h * 2.5;
             eddy_x = sin(sway + pid) * 1100.0 * temp_factor * top_spread;
             eddy_x += cos(sway * 2.1 + pid * 1.3) * 360.0 * temp_factor * top_spread;
-            // Vertical eddy: slight upward turbulence (billow shape driver)
             eddy_y = cos(sway * 1.4 + pid * 0.6) * 120.0 * temp_factor;
             eddy_y += sin(sway * 3.0 + pid) * 60.0 * temp_factor;
         } else {
-            // Smoke: original eddy model
+            // Smoke/steam: original eddy model
             float phase = float(i) * 2.399 + p.x * 0.037 + p.y * 0.029;
             float phase2 = float(i) * 1.713 + p.x * 0.053 - p.y * 0.041;
             eddy_x = (sin(phase * 0.9 + cos(phase2 * 0.7) * 1.6)
@@ -157,15 +172,14 @@ void main() {
         }
         v.x += eddy_x * sub_dt;
         v.y += eddy_y * sub_dt;
-        // Mild column guidance: gentle centering only at mid-height where spread is worst
-        if (sim_mode == 2) {
+        // Column guidance only for fire
+        if (my_type == PTYPE_FIRE) {
             float dx = p.x - mouse_pos.x;
             float rise = mouse_pos.y - p.y;
-            // Only active in middle band (40-180px up), not near base or far tip
             float guide_zone = smoothstep(20.0, 50.0, rise) * smoothstep(120.0, 90.0, rise);
             v.x -= dx * 2.8 * guide_zone * temp_factor * sub_dt;
         }
-        // Body interaction: boundary layer drag + wake (physical, no trick)
+        // Body interaction: boundary layer drag + wake
         for (int b = 0; b < body_count; b++) {
             if (bodies[b].enabled == 0) continue;
             vec2 to_body = p - bodies[b].pos;
@@ -174,10 +188,8 @@ void main() {
             float influence = radius * 3.5;
             if (dist < influence && dist > 0.001) {
                 vec2 dir = to_body / dist;
-                // Partial no-slip: boundary layer drag
                 float drag = (1.0 - smoothstep(radius, influence, dist)) * body_drag_gas;
                 v = mix(v, bodies[b].vel, drag * sub_dt);
-                // Wake: low pressure behind moving body (Bernoulli)
                 vec2 body_vel_dir = normalize(bodies[b].vel + vec2(0.001));
                 float behind = -dot(body_vel_dir, dir);
                 if (behind > 0.0) {
