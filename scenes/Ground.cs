@@ -413,7 +413,7 @@ public partial class Ground : StaticBody2D
 		{
 			int num_jets = 3;
 			float jet_spacing = 14f;
-			int per_jet = 4;
+			int per_jet = 8;
 			float[] jet_temp = { 1450f, 1550f, 1450f };
 			float[] jet_vscale = { 0.9f, 1.0f, 0.9f };
 			for (int j = 0; j < num_jets; j++)

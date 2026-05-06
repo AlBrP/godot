@@ -375,6 +375,35 @@ void fragment() {
 		}
 		shape_field = max(shape_field, base_arc * 0.7);
 
+		// Taper: convex width envelope + center spike (scaled to visible ny ~0-0.3)
+		{
+			float ny_norm = clamp(ny / 0.28, 0.0, 1.0);
+			float rate = 1.0 - ny_norm;
+			float tdist = abs(worldPos.x - flame_axis_x);
+			float tmax = 65.0 * rate;
+			float tsoft = 3.0 + rate * 7.0;
+			shape_field *= (1.0 - smoothstep(tmax - tsoft, tmax, tdist));
+
+			// Center spike: physics-driven axis tongue for pointed tip
+			float sny = ny * 3.5;
+			float th = flame_h * 0.25;
+			float ystart = flame_h * 0.08;
+			float sty = (local_y - ystart) / max(th, 1.0);
+			if (sty >= -0.04 && sty <= 1.08) {
+				float psway = avg_vx * 0.12 + (avg_curl - 0.5) * 2.0 + sin(local_y * 0.06 + 1.5) * 1.5 * 0.05;
+				float scx = flame_axis_x + psway;
+				float sbw = 0.12 * flame_hw * edge_noise;
+				float swidth = sbw * pow(max(0.0, 1.0 - sty * 0.9), 2.5);
+				float sdist = abs(worldPos.x - scx);
+				float sdn = sdist / max(swidth, 0.001);
+				if (sdn < 1.0) {
+					float sc = pow(max(0.0, 1.0 - sdn), 3.0 + 5.0 * sny);
+					float sve = smoothstep(-0.03, 0.10, sty) * pow(max(0.0, 1.0 - smoothstep(0.80, 1.05, sty)), 1.5);
+					shape_field = max(shape_field, sc * sve * 2.5);
+				}
+			}
+		}
+
 		// Particle density gate
 		float density_gate = smoothstep(0.01, 0.12, total_fire * 0.01);
 		float flame_field = shape_field * density_gate;
