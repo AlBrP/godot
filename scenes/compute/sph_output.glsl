@@ -64,11 +64,17 @@ layout(set = 0, binding = 7, std140) uniform Params {
     vec4 ptype_cooling;
     vec4 ptype_init_temp;
     vec4 ptype_lifetime;
+    vec4 ptype_near_pressure_scale;
 };
 
 layout(set = 1, binding = 0, rgba16f) uniform image2D position_tex;
 layout(set = 1, binding = 1, rg32f) uniform image2D hashlookup_tex;
 layout(set = 1, binding = 2, rgba16f) uniform image2D physics_tex;
+// stable_position_tex: same channel layout as position_tex, but indexed by
+// raw particle id (pidx) instead of sorted-slot. Used by INSTANCE_ID-based
+// sprite renderers (e.g. smoke_sprite) so each particle stays bound to one
+// pixel even when the spatial-hash sort reshuffles sorted_indices each frame.
+layout(set = 1, binding = 3, rgba16f) uniform image2D stable_position_tex;
 
 const int TEX_W = 72;
 const int TEX_H = 70;
@@ -77,6 +83,7 @@ const int TOTAL_PIXELS = TEX_W * TEX_H;
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
 int density_offset(int i) { return particle_count * 6 + i; }
 int temperature_offset(int i) { return particle_count * 8 + i; }
+int age_offset(int i) { return particle_count * 9 + i; }
 int type_offset(int i) { return particle_count * 10 + i; }
 int curl_offset(int i) { return particle_count * 11 + i; }
 
@@ -108,6 +115,21 @@ void main() {
             extra = clamp(density_val * 0.05, 0.0, 1.0);
         }
         imageStore(position_tex, tex_coord, vec4(world_pos, type_encoded, extra));
+
+        // Stable view: indexed by pidx, used by INSTANCE_ID-based sprite
+        // renderers. For smoke/steam, replace .a (extra) with remaining-life
+        // fraction so the sprite shader can smoothly fade alpha to 0 right
+        // before integrate.glsl teleports the particle off-screen. For other
+        // types, keep extra as-is (temp/density) since fire metaball still
+        // reads .a for color via position_tex anyway.
+        float stable_extra = extra;
+        if (my_type == PTYPE_SMOKE || my_type == PTYPE_STEAM) {
+            float age = particle_data[age_offset(int(pidx))];
+            float lifetime = ptype_lifetime[my_type];
+            stable_extra = clamp(1.0 - age / max(lifetime, 0.001), 0.0, 1.0);
+        }
+        ivec2 stable_coord = ivec2(int(pidx) % TEX_W, int(pidx) / TEX_W);
+        imageStore(stable_position_tex, stable_coord, vec4(world_pos, type_encoded, stable_extra));
 
         // -- Physics data: velocity, curl proxy, pressure --
         vec2 vel_out = vec2(0.0);
@@ -148,5 +170,9 @@ void main() {
         imageStore(position_tex, tex_coord, vec4(0.0, 0.0, 0.0, 0.0));
         imageStore(hashlookup_tex, tex_coord, vec4(-1.0, -1.0, 0.0, 0.0));
         imageStore(physics_tex, tex_coord, vec4(0.0, 0.0, 0.0, 0.0));
+        // stable_position_tex shares the same TEX_W x TEX_H grid as position_tex.
+        // Pixels past particle_count are unused by the pidx mapping too, so
+        // mirror the clear here for consistency / predictable sampling.
+        imageStore(stable_position_tex, tex_coord, vec4(0.0, 0.0, 0.0, 0.0));
     }
 }

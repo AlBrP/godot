@@ -59,6 +59,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     vec4 ptype_cooling;
     vec4 ptype_init_temp;
     vec4 ptype_lifetime;
+    vec4 ptype_near_pressure_scale;
 };
 
 const int MAX_BODIES = 4;
@@ -147,27 +148,17 @@ void main() {
         float bf = ptype_buoyancy[my_type];
         float T_ratio = my_temp / max(ambient_temperature, 0.001);
         v.y -= gravity * bf * (T_ratio - 1.0) * sub_dt;
-        // Subgrid eddy model (LES)
+        // Real curl-driven eddy (unified for fire/smoke/steam): Helmholtz vorticity.
+        // strength = curl * |v|, dimensionally correct (1/s * px/s = px/s^2).
+        // Auto-scales per gas: fast gas -> strong eddy, slow gas -> weak eddy.
         float temp_factor = my_temp / max(init_temp, 1.0);
-        float eddy_x, eddy_y;
-        if (my_type == PTYPE_FIRE) {
-            // Real curl-driven eddy: force perpendicular to velocity, strength from stored curl
-            float my_curl = particle_data[curl_offset(int(i))];
-            vec2 vel_dir = normalize(v + vec2(0.001));
-            vec2 lateral = vec2(-vel_dir.y, vel_dir.x);
-            float strength = clamp(my_curl * 400.0, -2000.0, 2000.0) * temp_factor;
-            eddy_x = lateral.x * strength;
-            eddy_y = lateral.y * strength * 0.15;
-        } else {
-            // Smoke/steam: original eddy model
-            float phase = float(i) * 2.399 + p.x * 0.037 + p.y * 0.029;
-            float phase2 = float(i) * 1.713 + p.x * 0.053 - p.y * 0.041;
-            eddy_x = (sin(phase * 0.9 + cos(phase2 * 0.7) * 1.6)
-                    + cos(phase2 * 1.1) * sin(phase * 0.6) * 0.7) * 900.0 * temp_factor;
-            eddy_y = (cos(phase * 1.3) * sin(phase2 * 0.8) * 0.5
-                    + sin(phase * 0.5 + phase2) * 0.3
-                    + cos(phase2 * 0.4 + phase) * 0.2) * 500.0 * temp_factor;
-        }
+        float my_curl = particle_data[curl_offset(int(i))];
+        float v_mag = length(v + vec2(0.001));
+        vec2 vel_dir = (v + vec2(0.001)) / v_mag;
+        vec2 lateral = vec2(-vel_dir.y, vel_dir.x);
+        float strength = clamp(my_curl * v_mag, -v_mag * 1.5, v_mag * 1.5) * temp_factor;
+        float eddy_x = lateral.x * strength;
+        float eddy_y = lateral.y * strength;
         v.x += eddy_x * sub_dt;
         v.y += eddy_y * sub_dt;
         // Body interaction: boundary layer drag + wake

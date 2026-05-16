@@ -38,10 +38,12 @@ public class SphGpu
 	private Rid hashlookup_tex_rid;
 	private Rid smoke_tex_rid;
 	private Rid physics_tex_rid;
+	private Rid stable_position_tex_rid;
 	public Texture2Drd PositionTex { get; private set; }
 	public Texture2Drd HashLookupTex { get; private set; }
 	public Texture2Drd SmokeTex { get; private set; }
 	public Texture2Drd PhysicsTex { get; private set; }
+	public Texture2Drd StablePositionTex { get; private set; }
 
 	// Shader + Pipeline RIDs
 	private Rid shader_forces_hash;
@@ -86,7 +88,7 @@ public class SphGpu
 	private const int HISTOGRAM_BUF_SIZE = N * 4;
 	private const int PREFIX_BUF_SIZE = N * 4;
 	private const int BLOCK_SUMS_BUF_SIZE = NUM_GROUPS * 4;
-	private const int PARAMS_BUF_SIZE = 288;
+	private const int PARAMS_BUF_SIZE = 304;
 
 	public void Init()
 	{
@@ -146,6 +148,18 @@ public class SphGpu
 		physics_tex_rid = RD.TextureCreate(physFmt, defaultView);
 		PhysicsTex = new Texture2Drd();
 		PhysicsTex.TextureRdRid = physics_tex_rid;
+
+		// stable_position_tex: same format as position_tex but indexed by raw
+		// particle id (pidx), not by sorted-slot. Sprite renderers that key
+		// off INSTANCE_ID must sample this one so a particle keeps the same
+		// pixel even when spatial-hash sort reshuffles sorted_indices.
+		var stableFmt = new RDTextureFormat();
+		stableFmt.Width = TEX_W; stableFmt.Height = TEX_H;
+		stableFmt.Format = RenderingDevice.DataFormat.R16G16B16A16Sfloat;
+		stableFmt.UsageBits = RenderingDevice.TextureUsageBits.StorageBit | RenderingDevice.TextureUsageBits.SamplingBit;
+		stable_position_tex_rid = RD.TextureCreate(stableFmt, defaultView);
+		StablePositionTex = new Texture2Drd();
+		StablePositionTex.TextureRdRid = stable_position_tex_rid;
 
 		force_accum_buf = RD.StorageBufferCreate(FORCE_ACCUM_SIZE, new byte[FORCE_ACCUM_SIZE]);
 		sdf_buf = RD.StorageBufferCreate(SDF_BUF_SIZE, new byte[SDF_BUF_SIZE]);
@@ -275,6 +289,7 @@ public class SphGpu
 		uniform_set_output_1 = MakeUniformSet(shader_output, 1, new Godot.Collections.Array<RDUniform> {
 			MakeImageUniform(0, position_tex_rid), MakeImageUniform(1, hashlookup_tex_rid),
 			MakeImageUniform(2, physics_tex_rid),
+			MakeImageUniform(3, stable_position_tex_rid),
 		});
 	}
 
@@ -347,7 +362,8 @@ public class SphGpu
 		float pDiffW = 0f, float pDiffF = 0f, float pDiffS = 0f, float pDiffSt = 0f,
 		float pCoolW = 0f, float pCoolF = 0f, float pCoolS = 0f, float pCoolSt = 0f,
 		float pTempW = 0f, float pTempF = 0f, float pTempS = 0f, float pTempSt = 0f,
-		float pLifeW = 0f, float pLifeF = 0f, float pLifeS = 0f, float pLifeSt = 0f)
+		float pLifeW = 0f, float pLifeF = 0f, float pLifeS = 0f, float pLifeSt = 0f,
+			float pNearW = 1f, float pNearF = 0.5f, float pNearS = 0.3f, float pNearSt = 0.3f)
 	{
 		byte[] data = new byte[PARAMS_BUF_SIZE];
 		int offset = 0;
@@ -405,7 +421,9 @@ public class SphGpu
 		WriteFloat(data, ref offset, pTempS);    WriteFloat(data, ref offset, pTempSt);  // 256
 		WriteFloat(data, ref offset, pLifeW);    WriteFloat(data, ref offset, pLifeF);
 		WriteFloat(data, ref offset, pLifeS);    WriteFloat(data, ref offset, pLifeSt);   // 272
-		// Total: 288 bytes
+		WriteFloat(data, ref offset, pNearW);   WriteFloat(data, ref offset, pNearF);
+		WriteFloat(data, ref offset, pNearS);   WriteFloat(data, ref offset, pNearSt);   // 288
+		// Total: 304 bytes
 		RD.BufferUpdate(params_ubuf, 0, PARAMS_BUF_SIZE, data);
 	}
 
@@ -608,6 +626,7 @@ public class SphGpu
 	public void Free()
 	{
 		RD.FreeRid(position_tex_rid); RD.FreeRid(hashlookup_tex_rid); RD.FreeRid(smoke_tex_rid); RD.FreeRid(physics_tex_rid);
+		RD.FreeRid(stable_position_tex_rid);
 		RD.FreeRid(force_accum_buf); RD.FreeRid(sdf_buf); RD.FreeRid(body_data_buf);
 		RD.FreeRid(particle_buf); RD.FreeRid(hash_buf); RD.FreeRid(sort_buf);
 		RD.FreeRid(hashtable_buf); RD.FreeRid(histogram_buf); RD.FreeRid(prefix_buf);

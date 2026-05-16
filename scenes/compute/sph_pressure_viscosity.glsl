@@ -94,6 +94,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     vec4 ptype_cooling;
     vec4 ptype_init_temp;
     vec4 ptype_lifetime;
+    vec4 ptype_near_pressure_scale;
 };
 
 float spiky_pow2_deriv_scale;
@@ -205,7 +206,7 @@ void main() {
         float temp_ratio = my_temp / ambient_temperature;
         float gs = ptype_stiffness[my_type];
         my_pressure = my_density * gs * temp_ratio;
-        my_near_pressure = my_near_density * gs * temp_ratio * 0.15;
+        my_near_pressure = my_near_density * gs * temp_ratio * ptype_near_pressure_scale[my_type];
     } else {
         my_pressure = pressure_from_density(my_density);
         my_near_pressure = near_pressure_from_density(my_near_density);
@@ -248,7 +249,7 @@ void main() {
                     float nb_temp_ratio = nb_temp / ambient_temperature;
                     float ngs = ptype_stiffness[nb_type];
                     nb_pressure = nb_density * ngs * nb_temp_ratio;
-                    nb_near_pressure = nb_near_density * ngs * nb_temp_ratio * 0.15;
+                    nb_near_pressure = nb_near_density * ngs * nb_temp_ratio * ptype_near_pressure_scale[nb_type];
                 } else {
                     nb_pressure = pressure_from_density(nb_density);
                     nb_near_pressure = near_pressure_from_density(nb_near_density);

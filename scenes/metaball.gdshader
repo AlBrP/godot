@@ -79,13 +79,11 @@ void fragment() {
 	float total = 0.0;
 	float total_water = 0.0;
 	float total_fire = 0.0;
-	float total_smoke = 0.0;
 	vec2 avg_vel = vec2(0.0);
 	float vel_weight_sum = 0.0;
 	float sum_pos_x = 0.0;
 	float sum_pos_y = 0.0;
 	float fire_weight_sum = 0.0;
-	float smoke_temp_sum = 0.0;
 	float avg_vx = 0.0, avg_vy = 0.0;
 	float vel_weight_sum_fire = 0.0;
 	float avg_curl = 0.0, curl_weight_sum = 0.0;
@@ -98,7 +96,8 @@ void fragment() {
 	vec2 localPos = worldPos - ground_offset;
 	ivec2 center_cell = ivec2(floor(localPos / grid_cell_size));
 
-	// Dynamic search radius: ensure 3-sigma coverage
+	// Dynamic search radius: 3-sigma coverage for water/fire kernel.
+	// Smoke is now rendered by the sprite-based MultiMesh (smoke_sprite.gdshader).
 	int search_r = int(ceil(3.0 * sigma / grid_cell_size));
 	search_r = min(search_r, 6); // safety cap
 
@@ -174,9 +173,10 @@ void fragment() {
 					sum_pos_y += pdata.g * w;
 					fire_weight_sum += w;
 				} else if (ptype == PTYPE_SMOKE || ptype == PTYPE_STEAM) {
-					w = particle_contrib(pdiff, inv_2sq, cutoff_sq);
-					total_smoke += w;
-					smoke_temp_sum += extra * w;
+					// Smoke/steam are rendered by SmokeSpriteRenderer (MultiMesh
+					// + smoke_sprite.gdshader). Skip here so they don't contaminate
+					// water/fire metaball totals.
+					w = 0.0;
 				} else {
 					// Water
 					w = particle_contrib(pdiff, inv_2sq, cutoff_sq);
@@ -484,24 +484,6 @@ void fragment() {
 			float flame_alpha = 0.45 + in_flame * 0.52;
 			COLOR = vec4(flame_color, flame_alpha);
 		}
-	} else if (total_smoke > 0.01) {
-		float avg_temp = vel_weight_sum > 0.001 ? smoke_temp_sum / vel_weight_sum : 0.0;
-		float temp_opacity = smoothstep(0.15, 0.55, avg_temp);
-		float smoke_alpha = smoothstep(0.2, 2.0, total_smoke) * 0.65 * temp_opacity;
-		// Steam white: hot vapor (dense white) to cool condensate (thin gray-white)
-		vec3 dense_steam   = vec3(0.95, 0.97, 1.0);
-		vec3 steam         = vec3(0.88, 0.90, 0.93);
-		vec3 thin_steam    = vec3(0.7, 0.72, 0.75);
-		vec3 fading_steam  = vec3(0.92, 0.92, 0.93);
-		vec3 smoke_color;
-		if (avg_temp > 0.6) {
-			smoke_color = mix(steam, dense_steam, (avg_temp - 0.6) / 0.4);
-		} else if (avg_temp > 0.25) {
-			smoke_color = mix(thin_steam, steam, (avg_temp - 0.25) / 0.35);
-		} else {
-			smoke_color = mix(fading_steam, thin_steam, avg_temp / 0.25);
-		}
-		COLOR = vec4(smoke_color, smoke_alpha);
 	} else if (debug_mode == 1) {
 		float t = clamp(total_water / (body_threshold * 1.5), 0.0, 1.0);
 		vec3 heat;

@@ -71,6 +71,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     vec4 ptype_cooling;
     vec4 ptype_init_temp;
     vec4 ptype_lifetime;
+    vec4 ptype_near_pressure_scale;
 };
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
@@ -107,12 +108,12 @@ void main() {
         if (dist < sr && dist > 0.0001) {
             float penetration = sr - dist;
             vec2 normal = diff / dist;
-            float push_strength = my_type != PTYPE_WATER ? 0.4 : 1.0;
+            float push_strength = 1.0;
             p += normal * penetration * push_strength;
             vec2 rel_v = v - bodies[b].vel;
             float vn = dot(rel_v, normal);
             if (vn < 0.0)
-                v = bodies[b].vel + reflect(rel_v, normal) * (my_type != PTYPE_WATER ? 0.35 : collision_damping);
+                v = bodies[b].vel + reflect(rel_v, normal) * collision_damping;
         }
     }
 

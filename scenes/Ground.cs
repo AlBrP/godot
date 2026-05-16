@@ -63,6 +63,7 @@ public partial class Ground : StaticBody2D
 
 	// Render
 	private Color_Rect colorRect_;
+	private SmokeSpriteRenderer smokeSprites_;
 
 	// Pause
 	private bool paused_ = false;
@@ -142,6 +143,8 @@ public partial class Ground : StaticBody2D
 		sph_gpu_.Init();
 		colorRect_.SetGpuTextures(sph_gpu_.PositionTex, sph_gpu_.HashLookupTex);
 		colorRect_.SetGpuPhysicsTexture(sph_gpu_.PhysicsTex);
+		smokeSprites_ = GetNode<SmokeSpriteRenderer>("../CanvasLayer/SubVPContainer/SubVP/SmokeSprites");
+		smokeSprites_.SetGpuTextures(sph_gpu_.PositionTex, sph_gpu_.PhysicsTex, sph_gpu_.StablePositionTex);
 		SetParticleSpritesVisible(false);
 		colorRect_.SetGpuMode(true);
 		sph_gpu_.ResetParticles(pos_, vel_, Position);
@@ -585,8 +588,9 @@ public partial class Ground : StaticBody2D
 			0f, cooling_rate * 15f, cooling_rate, cooling_rate,
 			// ptype_init_temp: [water=0, fire=1500, smoke=800, steam=500]
 			0f, fire_temperature, 800f, 500f,
-			// ptype_lifetime: [water=99999, fire=0.75, smoke=2.5, steam=2.0]
-			99999f, particle_lifetime * 0.3f, particle_lifetime, 2.0f);
+			// ptype_lifetime: [water=99999, fire=lifetime*0.3, smoke=lifetime*0.5, steam=2.0]
+			// Smoke lifetime halved so the plume is roughly half as tall as before.
+			99999f, particle_lifetime * 0.3f, particle_lifetime * 0.5f, 2.0f);
 		sph_gpu_.DispatchFrame(frameDt, iterations_per_frame);
 	}
 

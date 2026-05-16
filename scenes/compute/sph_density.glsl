@@ -90,6 +90,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     vec4 ptype_cooling;
     vec4 ptype_init_temp;
     vec4 ptype_lifetime;
+    vec4 ptype_near_pressure_scale;
 };
 
 float spiky_pow2_scale;

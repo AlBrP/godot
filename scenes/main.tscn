@@ -1,8 +1,9 @@
-[gd_scene load_steps=6 format=3 uid="uid://be8ticxudt62q"]
+[gd_scene load_steps=7 format=3 uid="uid://be8ticxudt62q"]
 
 [ext_resource type="Shader" path="res://scenes/metaball.gdshader" id="1_metaball"]
 [ext_resource type="Script" path="res://scenes/Color_Rect.cs" id="2_gl22a"]
 [ext_resource type="PackedScene" uid="uid://bplaqc5lnarr5" path="res://scenes/ground.tscn" id="2_j27gb"]
+[ext_resource type="Script" path="res://scenes/SmokeSpriteRenderer.cs" id="3_smokesp"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_test"]
 shader = ExtResource("1_metaball")
@@ -64,6 +65,9 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("2_gl22a")
+
+[node name="SmokeSprites" type="MultiMeshInstance2D" parent="CanvasLayer/SubVPContainer/SubVP"]
+script = ExtResource("3_smokesp")
 
 [node name="Ground" parent="." instance=ExtResource("2_j27gb")]
 position = Vector2(-5, 22)
