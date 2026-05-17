@@ -28,6 +28,12 @@ public partial class SmokeSpriteRenderer : MultiMeshInstance2D
 		shader_material_ = new ShaderMaterial();
 		shader_material_.Shader = ResourceLoader.Load<Shader>("res://scenes/smoke_sprite.gdshader");
 		Material = shader_material_;
+
+		// Smoke now renders through metaball.gdshader (toon path) for visual
+		// consistency with water/fire. Keep this node + shader around so we
+		// can flip back to the sprite pipeline later if needed, but hide it
+		// to avoid double rendering.
+		Visible = false;
 	}
 
 	public void SetGpuTextures(Texture2Drd posTex, Texture2Drd physTex, Texture2Drd stableTex)

@@ -136,7 +136,7 @@ void main() {
         float curl_out = 0.0;
         float pressure_out = 0.0;
 
-        if (my_type != PTYPE_WATER) {
+        if (my_type == PTYPE_FIRE) {
             int vi = vel_offset(int(pidx));
             vel_out = vec2(particle_data[vi], particle_data[vi + 1]);
 
@@ -149,6 +149,27 @@ void main() {
 
             // Real curl from pressure_viscosity pass (stored in particle buffer)
             curl_out = particle_data[curl_offset(int(pidx))];
+        } else if (my_type == PTYPE_SMOKE || my_type == PTYPE_STEAM) {
+            int vi = vel_offset(int(pidx));
+            vel_out = vec2(particle_data[vi], particle_data[vi + 1]);
+
+            float dens = particle_data[density_offset(int(pidx))];
+            float temp = particle_data[temperature_offset(int(pidx))];
+            float gs = ptype_stiffness[my_type];
+            pressure_out = dens * gs * (temp / max(ambient_temperature, 1.0));
+
+            // .b channel: remaining-life fraction. Read by metaball smoke
+            // shader to fade alpha to 0 in the last ~20% of lifetime so the
+            // puff vanishes smoothly instead of popping out the frame
+            // integrate.glsl teleports it to -600. Dead particles get 0
+            // (caught by temp_n>0.02 gate too, but kept defensive).
+            if (p.y < -500.0) {
+                curl_out = 0.0;
+            } else {
+                float age = particle_data[age_offset(int(pidx))];
+                float lifetime = ptype_lifetime[my_type];
+                curl_out = clamp(1.0 - age / max(lifetime, 0.001), 0.0, 1.0);
+            }
         } else {
             int vi_w = vel_offset(int(pidx));
             vel_out = vec2(particle_data[vi_w], particle_data[vi_w + 1]);

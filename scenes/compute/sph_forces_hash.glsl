@@ -213,14 +213,20 @@ void main() {
     particle_data[vi] = v.x;
     particle_data[vi + 1] = v.y;
 
-    // Compute predicted position
+    // Compute predicted position (kept for sph_density/pressure to use as
+    // their "current position" -- standard PCISPH/PBF stabilisation trick).
     vec2 pred = p + v * prediction_factor;
     int pi = pred_offset(int(i));
     particle_data[pi] = pred.x;
     particle_data[pi + 1] = pred.y;
 
-    // Compute grid cell and hash
-    ivec2 cell = ivec2(floor(pred * grid_cell_inverse));
+    // Compute grid cell and hash from p (not pred). Hashing on pred means
+    // the hash key jumps every time velocity changes direction, which is
+    // common for old smoke particles in the sparse top of the plume (few
+    // SPH neighbours -> noisy pressure -> v shimmers). The metaball SDF
+    // sees pdata.rg = p + offset, so aligning hash to p eliminates the
+    // pred-vs-p drift that caused sliced lobes and per-frame flicker.
+    ivec2 cell = ivec2(floor(p * grid_cell_inverse));
     grid_cell_coord[i] = cell;
     hash_values[i] = hash_cell(cell);
 }

@@ -79,6 +79,34 @@ void fragment() {
 	float total = 0.0;
 	float total_water = 0.0;
 	float total_fire = 0.0;
+	// Smoke is SDF-based, but combined via exponential soft-min instead
+	// of polynomial smooth-min: -k*log(sum_i exp(-d_i/k)). This is
+	// commutative AND associative, so the result is independent of the
+	// bucket iteration order. Polynomial smooth-min is non-associative,
+	// and since sorted_indices reshuffles every frame, the same pixel
+	// got different sdf values across frames -> visible flicker. It also
+	// produced D-shape / sliced lobes on isolated puffs because adjacent
+	// fragments saw different orderings and computed different sdfs.
+	// k=3 matches the visual hardness of the old polynomial blend_k=9
+	// (k_exp ≈ blend_k_poly * 0.36, derived from equal 2-particle merge
+	// depth: polynomial gives a - 0.25*k_poly, exp gives a - k_exp*ln2).
+	const float smoke_k = 3.0;
+	float smoke_softmin_sum = 0.0;
+	// Max single-particle contribution. Used to derive "concentration" =
+	// max/sum at output: ~1 when one puff dominates this fragment, low
+	// (~1/N) when N far-away puffs are summing up into ghost-bridging
+	// territory. Outline is gated by this so ghost regions don't paint
+	// phantom ink-lines, while real silhouettes (single dominant puff)
+	// still get the full cartoon stroke.
+	float smoke_max_contrib = 0.0;
+	// Average remaining-life of smoke particles contributing here. Used at
+	// output to fade alpha in the last ~20% of lifetime. Geometry doesn't
+	// shrink — only alpha drops, so the puff disappears in place instead
+	// of visibly collapsing inward.
+	float smoke_life_sum = 0.0;
+	float smoke_life_weight = 0.0;
+	vec2 sdf_grad = vec2(0.0);
+	float grad_weight_sum = 0.0;
 	vec2 avg_vel = vec2(0.0);
 	float vel_weight_sum = 0.0;
 	float sum_pos_x = 0.0;
@@ -97,15 +125,19 @@ void fragment() {
 	ivec2 center_cell = ivec2(floor(localPos / grid_cell_size));
 
 	// Dynamic search radius: 3-sigma coverage for water/fire kernel.
-	// Smoke is now rendered by the sprite-based MultiMesh (smoke_sprite.gdshader).
-	int search_r = int(ceil(3.0 * sigma / grid_cell_size));
+	// Smoke uses SDF -- search 3 cells covers puff_radius(22) + a few
+	// blend_k(9) widths beyond which smooth-min contribution is ~0.
+	// search_r=6 was 6.76x the work and tanked fps to 30-50.
+	int search_r_kernel = int(ceil(3.0 * sigma / grid_cell_size));
+	int search_r_smoke  = 3;
+	int search_r = max(search_r_kernel, search_r_smoke);
 	search_r = min(search_r, 6); // safety cap
 
 	int tex_w = int(texture_size.x);
 
 	// Iterate surrounding (2*search_r+1)^2 cells
-	for (int dy = -6; dy <= 6; dy++) {
-		for (int dx = -6; dx <= 6; dx++) {
+	for (int dy = -3; dy <= 3; dy++) {
+		for (int dx = -3; dx <= 3; dx++) {
 			// Skip if outside search radius (compiler can unroll constant loop)
 			if (abs(dx) > search_r || abs(dy) > search_r) continue;
 
@@ -173,9 +205,46 @@ void fragment() {
 					sum_pos_y += pdata.g * w;
 					fire_weight_sum += w;
 				} else if (ptype == PTYPE_SMOKE || ptype == PTYPE_STEAM) {
-					// Smoke/steam are rendered by SmokeSpriteRenderer (MultiMesh
-					// + smoke_sprite.gdshader). Skip here so they don't contaminate
-					// water/fire metaball totals.
+					// Cartoon smoke: each particle is a hard disc (SDF) at
+					// distance d = |pdiff| - puff_radius. Combined across
+					// particles via exponential soft-min (accumulated in
+					// smoke_softmin_sum, finalised after the loop). See
+					// header comment near smoke_k for rationale.
+					float temp_n = extra;
+					if (temp_n > 0.02) {
+						float fade = smoothstep(0.02, 0.35, temp_n);
+						float puff_radius = 22.0 * fade;
+						float dist = length(pdiff);
+						// Wispy edge: dying puffs get organic SDF noise that
+						// breaks their silhouette into 2-3 large lobes/dents
+						// (mimicking how real smoke disperses into fragments).
+						// Wavelengths ~ puff_radius so we get smooth bumps,
+						// not high-frequency spikes. Particle position seeds
+						// per-puff phase so neighbours deform independently.
+						// wispy uses pow(.., 2.0) so mid-life puffs stay nearly
+						// circular and only old ones visibly fragment.
+						float plife = texelFetch(physics_texture, ivec2(px, py), 0).b;
+						float wispy = pow(clamp(1.0 - plife, 0.0, 1.0), 2.0);
+						float n1 = sin(pdiff.x * 0.12 + pdata.r * 0.05) * cos(pdiff.y * 0.10 + pdata.g * 0.03);
+						float n2 = sin(pdiff.x * 0.20 - pdata.g * 0.07) * cos(pdiff.y * 0.18 + pdata.r * 0.04);
+						float wisp_noise = n1 * 0.6 + n2 * 0.4;
+						float wisp_disp = wisp_noise * wispy * 10.0;
+						float d = dist - puff_radius + wisp_disp;
+						// Clamp scaled value so exp() stays in a sane range.
+						// d_min = -puff_radius = -22 -> scaled = 22/3 ≈ 7.3
+						// d_max in influence ~ 5*k ≈ 15 -> scaled ≈ -5
+						float scaled = clamp(-d / smoke_k, -8.0, 8.0);
+						float contrib = exp(scaled);
+						smoke_softmin_sum += contrib;
+						smoke_max_contrib = max(smoke_max_contrib, contrib);
+						smoke_life_sum += plife * contrib;
+						smoke_life_weight += contrib;
+						if (dist > 0.001) {
+							float gw = max(0.0, 1.0 - abs(d) / (puff_radius + smoke_k));
+							sdf_grad += (pdiff / dist) * gw;
+							grad_weight_sum += gw;
+						}
+					}
 					w = 0.0;
 				} else {
 					// Water
@@ -187,6 +256,11 @@ void fragment() {
 			}
 		}
 	}
+
+	// Finalise exponential soft-min: sdf = -k * log(sum_i exp(-d_i/k)).
+	// Empty sum -> no smoke contribution, fall through to 1e10 sentinel
+	// (same value the old polynomial path initialised to).
+	float sdf_smoke = smoke_softmin_sum > 1e-6 ? -smoke_k * log(smoke_softmin_sum) : 1e10;
 
 	if (fire_weight_sum > 0.001) {
 		sum_pos_x /= fire_weight_sum;
@@ -484,6 +558,79 @@ void fragment() {
 			float flame_alpha = 0.45 + in_flame * 0.52;
 			COLOR = vec4(flame_color, flame_alpha);
 		}
+	} else if (sdf_smoke < 0.5) {
+		// Cartoon smoke: SDF-based render. AA is driven by the SDF value
+		// itself (linear ramp over ~1.5 px around sdf=0), NOT by fwidth.
+		// fwidth would spike at hash-cell boundaries where the visible
+		// particle set jumps, smearing ghost ramps across the screen.
+		if (sdf_smoke > 0.0) discard; // hard cull outside, no leak from spikes
+		float aa = clamp(-sdf_smoke / 1.5, 0.0, 1.0);
+
+		// Depth into the lobe (0 at surface, grows toward core).
+		float depth = -sdf_smoke;
+
+		// Cell-shaded core->rim ramp. 3 discrete bands when toon_levels>0.
+		float ramp = clamp(depth / 14.0, 0.0, 1.0);
+		if (toon_levels > 0.5) {
+			ramp = floor(ramp * toon_levels) / toon_levels;
+		}
+
+		// Brighter palette overall; cartoon smoke reads as a white mass with
+		// shadow only on the dark side, not a continuous gradient.
+		vec3 smoke_bright = vec3(0.98, 0.99, 1.00);   // deep core
+		vec3 smoke_light  = vec3(0.88, 0.90, 0.93);   // mid
+		vec3 smoke_shade  = vec3(0.66, 0.68, 0.74);   // near-rim shadow
+
+		vec3 color;
+		if (ramp > 0.55)      color = smoke_bright;
+		else if (ramp > 0.25) color = mix(smoke_light, smoke_bright, smoothstep(0.25, 0.55, ramp));
+		else                  color = mix(smoke_shade, smoke_light,  smoothstep(0.0,  0.25, ramp));
+
+		// Cel-shaded per-bubble lighting: only the side facing AWAY from the
+		// light gets one discrete shadow step. The lit side and equator stay
+		// at full base color. This is what makes cartoon art read as flat
+		// shapes with a single shadow plane, not 3D plastic balls.
+		vec2 normal = grad_weight_sum > 0.001 ? normalize(sdf_grad) : vec2(0.0, -1.0);
+		vec2 light_dir = normalize(vec2(-0.45, -0.85)); // upper-left key
+		float NdotL = dot(normal, light_dir);
+		float shadow_strength = smoothstep(-0.15, -0.55, NdotL);
+		if (toon_levels > 0.5) {
+			shadow_strength = step(0.5, shadow_strength);
+		}
+		color *= mix(1.0, 0.78, shadow_strength);
+
+		// Outline gated by concentration = max_contrib / sum: ~1 when one
+		// puff truly owns this fragment (real silhouette), drops fast when
+		// many distant puffs each contribute a small amount (ghost zone
+		// where exp soft-min synthesises an sdf inside [-3.5, 0] band).
+		// This kills phantom ink-blobs in sparse top-of-plume regions
+		// without breaking real silhouettes or puff-valley outlines.
+		float concentration = smoke_softmin_sum > 0.001 ? smoke_max_contrib / smoke_softmin_sum : 0.0;
+		float outline_gate = smoothstep(0.35, 0.65, concentration);
+		float outline = smoothstep(-3.5, -1.0, sdf_smoke) * (1.0 - smoothstep(-1.0, 0.0, sdf_smoke));
+		outline *= outline_gate;
+		// Fading puffs need the outline to weaken with them, otherwise the
+		// near-black stroke_color stays opaque-ish under a low-alpha disc
+		// and reads as a dark blot instead of a white wisp.
+		float avg_life = smoke_life_weight > 0.001 ? smoke_life_sum / smoke_life_weight : 1.0;
+		// life_alpha curves: pow(life, 0.5) keeps young puffs near opaque
+		// while letting old ones get noticeably translucent (full lifetime
+		// fade, not just last 20%). Paired with the wispy SDF displacement
+		// this reads as "soft puff slowly dispersing into wisps", not "puff
+		// suddenly turning grey and vanishing".
+		float life_alpha = pow(clamp(avg_life, 0.0, 1.0), 0.5);
+		outline *= life_alpha;
+		vec3 outline_col = vec3(0.18, 0.20, 0.26);
+		color = mix(color, outline_col, outline * 0.95);
+
+		// Aggressive trend toward smoke_bright as the puff dies, so the
+		// last visible frames are a white wisp rather than a grey blot
+		// (shadow + outline tint under low alpha would otherwise read as
+		// dark grey when composited over the dim grey background).
+		color = mix(smoke_bright, color, pow(life_alpha, 2.5));
+
+		float final_alpha = max(aa, outline) * life_alpha;
+		COLOR = vec4(clamp(color, 0.0, 1.0), final_alpha);
 	} else if (debug_mode == 1) {
 		float t = clamp(total_water / (body_threshold * 1.5), 0.0, 1.0);
 		vec3 heat;
