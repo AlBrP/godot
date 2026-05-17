@@ -203,7 +203,11 @@ void main() {
     int vi = vel_offset(idxi);
     vec2 my_vel = vec2(particle_data[vi], particle_data[vi + 1]);
     int my_type = int(particle_data[type_offset(idxi)]);
-    float my_temp = my_type != PTYPE_WATER ? particle_data[temperature_offset(idxi)] : 0.0;
+    // Read my_temp for every type now — water needs to receive heat
+    // diffusion from fire neighbours so phase-transition (boil at
+    // 373K) can actually trigger. Pressure calc below still treats
+    // water specially (state equation vs ideal gas).
+    float my_temp = particle_data[temperature_offset(idxi)];
 
     float my_pressure, my_near_pressure;
     if (my_type != PTYPE_WATER) {
@@ -246,10 +250,11 @@ void main() {
                 float nb_density = particle_data[density_offset(int(neighbor_idx))];
                 float nb_near_density = particle_data[near_density_offset(int(neighbor_idx))];
                 float nb_pressure, nb_near_pressure;
-                float nb_temp = 0.0;
                 int nb_type = int(particle_data[type_offset(int(neighbor_idx))]);
+                // Read neighbour temperature unconditionally — needed for
+                // cross-type heat diffusion (fire heats water etc.).
+                float nb_temp = particle_data[temperature_offset(int(neighbor_idx))];
                 if (nb_type != PTYPE_WATER) {
-                    nb_temp = particle_data[temperature_offset(int(neighbor_idx))];
                     float nb_temp_ratio = nb_temp / ambient_temperature;
                     float ngs = ptype_stiffness[nb_type];
                     nb_pressure = nb_density * ngs * nb_temp_ratio;
@@ -268,8 +273,11 @@ void main() {
                 vec2 other_vel = vec2(particle_data[vn], particle_data[vn + 1]);
                 viscosity_force += (other_vel - my_vel) * poly6_kernel(dist);
 
+                // Heat diffusion: every type accumulates a temperature
+                // delta from every neighbour. ptype_diffusion gates the
+                // application below — water = slow conductor, gas = fast.
+                temp_delta += (nb_temp - my_temp) * poly6_kernel(dist);
                 if (my_type != PTYPE_WATER) {
-                    temp_delta += (nb_temp - my_temp) * poly6_kernel(dist);
                     float dvx = other_vel.x - my_vel.x;
                     float dvy = other_vel.y - my_vel.y;
                     float kernel_grad = spiky_pow2_derivative(dist);
@@ -297,9 +305,14 @@ void main() {
     particle_data[vi] += acceleration.x * sub_dt + viscosity_force.x * viscosity_strength * visc_mult * les_boost * sub_dt;
     particle_data[vi + 1] += acceleration.y * sub_dt + viscosity_force.y * viscosity_strength * visc_mult * les_boost * sub_dt;
 
-    // Vorticity confinement + temperature diffusion (gas types only)
+    // Temperature diffusion: every type applies temp_delta (water needs
+    // this for fire to heat it past the boil threshold). ptype_diffusion
+    // table scales — water typically larger than gas because of the
+    // sparse-coupling poly6 kernel, otherwise visible heating takes 30s+.
+    particle_data[temperature_offset(idxi)] += ptype_diffusion[my_type] * temp_delta * sub_dt;
+
+    // Vorticity confinement (gas types only — water has no vortex stretch).
     if (my_type != PTYPE_WATER) {
-        particle_data[temperature_offset(idxi)] += ptype_diffusion[my_type] * temp_delta * sub_dt;
         float omega = abs(my_curl);
         if (omega > 0.0001) {
             vec2 n = normalize(my_vel + vec2(0.001));

@@ -191,6 +191,22 @@ void main() {
     } else {
         // Water mode: full gravity
         v.y += gravity * sub_dt;
+
+        // Water temperature: Newton cooling toward ambient. Heat input
+        // comes from pressure_viscosity's diffusion (fire neighbours).
+        // Cooling rate kept small (ptype_cooling[WATER] ~30) so the heat
+        // accumulates long enough to actually cross the boil threshold.
+        // Clamp to ambient as lower bound — water never goes below it.
+        int ti = temperature_offset(int(i));
+        float my_temp_w = particle_data[ti];
+        // Newly spawned water particles may have temperature 0 from
+        // residual buffer state — snap them up to ambient on the very
+        // first frames so subsequent diffusion uses the right baseline.
+        if (my_temp_w < ambient_temperature * 0.5) my_temp_w = ambient_temperature;
+        float cool_rate_w = ptype_cooling[my_type];
+        my_temp_w -= cool_rate_w * sub_dt;
+        my_temp_w = max(my_temp_w, ambient_temperature);
+        particle_data[ti] = my_temp_w;
     }
 
     // Apply velocity damping

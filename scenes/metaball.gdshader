@@ -79,6 +79,11 @@ void fragment() {
 	float total = 0.0;
 	float total_water = 0.0;
 	float total_fire = 0.0;
+	// drew flag drives the priority cascade at the bottom: each branch
+	// sets drew=true after writing COLOR, downstream branches gate on
+	// !drew so they don't overwrite. Godot canvas_item fragment shader
+	// doesn't allow `return`, so this is the canonical way.
+	bool drew = false;
 	// Smoke is SDF-based, but combined via exponential soft-min instead
 	// of polynomial smooth-min: -k*log(sum_i exp(-d_i/k)). This is
 	// commutative AND associative, so the result is independent of the
@@ -485,7 +490,13 @@ void fragment() {
 		// Edge AA
 		float edge_width = fwidth(flame_field) * 1.4;
 		float in_flame = smoothstep(0.06 - edge_width, 0.06 + edge_width, flame_field);
-		if (in_flame < 0.005) discard;
+		// When fragment isn't inside the procedural flame body (cavity edge,
+		// e.g. where SPH pushed fire and water apart), DON'T discard — let
+		// it fall through to the smoke/steam SDF branch below so STEAM
+		// particles that actually live in the cavity get rendered. Use
+		// early return on the success path, drop into smoke/water on the
+		// fail path.
+		if (in_flame >= 0.005) {
 
 		if (debug_mode == 1) {
 			float t = clamp(flame_field / 4.0, 0.0, 1.0);
@@ -558,7 +569,10 @@ void fragment() {
 			float flame_alpha = 0.45 + in_flame * 0.52;
 			COLOR = vec4(flame_color, flame_alpha);
 		}
-	} else if (sdf_smoke < 0.5) {
+		drew = true;
+		}
+	}
+	if (!drew && sdf_smoke < 0.5) {
 		// Cartoon smoke: SDF-based render. AA is driven by the SDF value
 		// itself (linear ramp over ~1.5 px around sdf=0), NOT by fwidth.
 		// fwidth would spike at hash-cell boundaries where the visible
@@ -631,18 +645,24 @@ void fragment() {
 
 		float final_alpha = max(aa, outline) * life_alpha;
 		COLOR = vec4(clamp(color, 0.0, 1.0), final_alpha);
-	} else if (debug_mode == 1) {
+		drew = true;
+	}
+	if (!drew && debug_mode == 1) {
 		float t = clamp(total_water / (body_threshold * 1.5), 0.0, 1.0);
 		vec3 heat;
 		if (t < 0.5) heat = mix(vec3(0.0, 0.0, 0.2), vec3(0.0, 1.0, 0.0), t * 2.0);
 		else heat = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), (t - 0.5) * 2.0);
 		COLOR = vec4(heat, 1.0);
-	} else if (debug_mode == 2) {
+		drew = true;
+	}
+	if (!drew && debug_mode == 2) {
 		float t = clamp(total_water / (body_threshold * 1.5), 0.0, 1.0);
 		vec3 heat = t < 0.5 ? mix(vec3(0.0, 0.0, 0.2), vec3(0.0, 1.0, 0.0), t * 2.0)
 			: mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), (t - 0.5) * 2.0);
 		COLOR = vec4(heat, 1.0);
-	} else if (total_water > 0.01) {
+		drew = true;
+	}
+	if (!drew && total_water > 0.01) {
 		float edge_width = fwidth(total_water) * 1.5;
 		float aa = smoothstep(2.5 - edge_width, 2.5 + edge_width, total_water);
 		if (aa < 0.001) discard;
@@ -690,7 +710,7 @@ void fragment() {
 		// TODO: re-implement with field gradient or separate velocity texture
 
 		COLOR = vec4(clamp(color, 0.0, 1.0), aa);
-	} else {
-		discard;
+		drew = true;
 	}
+	if (!drew) discard;
 }

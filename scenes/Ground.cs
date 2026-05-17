@@ -51,6 +51,7 @@ public partial class Ground : StaticBody2D
 
 	// Mouse
 	public bool mouse_pressed_ = false;
+	public bool mouse_right_pressed_ = false;
 	private Vector2 mouse_position_ = Vector2.Zero;
 	private int spawn_index_ = 0;
 	private bool spray_mode_ = true;
@@ -367,8 +368,13 @@ public partial class Ground : StaticBody2D
 				float py = BitConverter.ToSingle(gpuData, i * 8 + 4);
 				pos_[i] = new Vector2(px, py);
 				particle_sprites_[i].Position = Position + pos_[i];
-				// Color by type: water=blue, fire=red, smoke=gray, steam=white
-				int ptype = BitConverter.ToInt32(gpuData, ball_nums_ * 40 + i * 4);
+				// Color by type: water=blue, fire=red, smoke=gray, steam=white.
+				// type field is stored as float in the particle buffer (so the
+				// shader can index ptype tables uniformly), so read it as a
+				// float and cast. ToInt32 on those 4 bytes would interpret the
+				// IEEE-754 bit pattern as an integer (fire=1.0 -> 0x3F800000 ->
+				// int 1065353216 ≠ 1) — that's why everything looked blue.
+				int ptype = (int)BitConverter.ToSingle(gpuData, ball_nums_ * 40 + i * 4);
 				if (ptype == 1) particle_sprites_[i].Modulate = new Color(1f, 0.3f, 0.05f, 0.8f);
 				else if (ptype == 2) particle_sprites_[i].Modulate = new Color(0.6f, 0.6f, 0.6f, 0.8f);
 				else if (ptype == 3) particle_sprites_[i].Modulate = new Color(0.9f, 0.9f, 1f, 0.8f);
@@ -457,20 +463,49 @@ public partial class Ground : StaticBody2D
 				particle_types_[idx] = 2; // PTYPE_SMOKE
 			}
 		}
-		else if (spray_mode_ && mouse_pressed_)
+		else if (spray_mode_)
 		{
-			int spawn_count = 8;
-			for (int s = 0; s < spawn_count; s++)
+			// Left click: water spray (Lv1 default behaviour)
+			if (mouse_pressed_)
 			{
-				int idx = spawn_index_ % ball_nums_;
-				spawn_index_++;
-				float angle = -Mathf.Pi * 0.5f + (float)GD.RandRange(-Mathf.Pi * 0.04f, Mathf.Pi * 0.04f);
-				float speed = (float)GD.RandRange(2000f, 2100f);
-				var vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
-				vel_[idx] = vel;
-				float along = (float)GD.RandRange(50f, 110f);
-				pos_[idx] = mouse_position_ + vel.Normalized() * along;
-				particle_types_[idx] = 0; // PTYPE_WATER
+				int spawn_count = 8;
+				for (int s = 0; s < spawn_count; s++)
+				{
+					int idx = spawn_index_ % ball_nums_;
+					spawn_index_++;
+					float angle = -Mathf.Pi * 0.5f + (float)GD.RandRange(-Mathf.Pi * 0.04f, Mathf.Pi * 0.04f);
+					float speed = (float)GD.RandRange(2000f, 2100f);
+					var vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
+					vel_[idx] = vel;
+					float along = (float)GD.RandRange(50f, 110f);
+					pos_[idx] = mouse_position_ + vel.Normalized() * along;
+					smoke_temp_[idx] = ambient_temperature; // 300K — sets water baseline so heat diffusion has the right starting point
+					particle_types_[idx] = 0; // PTYPE_WATER
+				}
+			}
+			// Right click: fire jet (Lv2 — emergent phase transition trigger).
+			// Small bursts so a water pool can actually heat up rather than
+			// getting overwhelmed by fire. Same physics as FIRE mode (ptype
+			// table drives stiffness/buoyancy/cooling/lifetime) — only the
+			// spawn cadence is lighter.
+			if (mouse_right_pressed_)
+			{
+				int per_burst = 12;
+				for (int s = 0; s < per_burst; s++)
+				{
+					int idx = spawn_index_ % ball_nums_;
+					spawn_index_++;
+					float angle = -Mathf.Pi * 0.5f + (float)GD.RandRange(-Mathf.Pi * 0.18f, Mathf.Pi * 0.18f);
+					float speed = (float)GD.RandRange(8f, 30f);
+					var vel = new Vector2(Mathf.Cos(angle) * speed, Mathf.Sin(angle) * speed);
+					vel_[idx] = vel;
+					pos_[idx] = mouse_position_ + new Vector2(
+						(float)(GD.Randf() - 0.5) * 14f,
+						40f + (float)(GD.Randf() - 0.5) * 4f
+					);
+					smoke_temp_[idx] = fire_temperature; // 1500K — matches ptype_init_temp[FIRE]
+					particle_types_[idx] = 1;            // PTYPE_FIRE
+				}
 			}
 		}
 
@@ -582,33 +617,48 @@ public partial class Ground : StaticBody2D
 			1.0f, gas_viscosity_ratio, gas_viscosity_ratio, gas_viscosity_ratio,
 			// ptype_vorticity: [water=0, fire=50, smoke=50, steam=50]
 			0f, vorticity_epsilon, vorticity_epsilon, vorticity_epsilon,
-			// ptype_diffusion: [water=0, fire=2, smoke=2, steam=2]
-			0f, temp_diffusion_rate, temp_diffusion_rate, temp_diffusion_rate,
-			// ptype_cooling: [water=0, fire=2700, smoke=180, steam=180]
-			0f, cooling_rate * 15f, cooling_rate, cooling_rate,
+			// ptype_diffusion: [water=100, fire=2, smoke=2, steam=2]
+			// Water diffusion bumped to 100: the poly6 kernel coupling is
+			// sparse and water has a much larger effective heat capacity
+			// than gas, so a moderate value still leaves a visible gap
+			// around the fire jet. 100 lets the cavity edge water boil
+			// fast enough to fill the gap with rising steam.
+			100f, temp_diffusion_rate, temp_diffusion_rate, temp_diffusion_rate,
+			// ptype_cooling: [water=30, fire=2700, smoke=180, steam=0]
+			// Steam cooling = 0 keeps boiled-off vapour at its init_temp so it
+			// doesn't immediately condense back into water (user prefers the
+			// vapour to ride up and disperse, not rain back down).
+			30f, cooling_rate * 15f, cooling_rate, 0f,
 			// ptype_init_temp: [water=0, fire=1500, smoke=800, steam=500]
 			0f, fire_temperature, 800f, 500f,
-			// ptype_lifetime: [water=99999, fire=lifetime*0.3, smoke=lifetime*0.5, steam=2.0]
-			// Smoke lifetime halved so the plume is roughly half as tall as before.
-			99999f, particle_lifetime * 0.3f, particle_lifetime * 0.5f, 2.0f,
+			// ptype_lifetime: [water=99999, fire=lifetime*0.3, smoke=lifetime*0.5, steam=6.0]
+			// Steam lifetime extended (was 2.0s) so the rising vapour cloud
+			// has time to thicken — short lifetime leaves sparse SDF puffs
+			// with visible gaps between them in the metaball render.
+			99999f, particle_lifetime * 0.3f, particle_lifetime * 0.5f, 6.0f,
 			// ptype_near_pressure_scale defaults (water=1, fire=0.5, smoke=0.3, steam=0.3)
 			1f, 0.5f, 0.3f, 0.3f,
-			// ptype_boil_point: water boils at 373K, others disabled (-1)
-			373f, -1f, -1f, -1f,
+			// ptype_boil_point: water boils at 320K (~47°C demo threshold).
+			// Real water needs 373K but the SPH temperature scale is loose
+			// and the visible cavity around a fire jet looks broken if water
+			// can't boil fast enough to fill it. 320 lets cavity-edge water
+			// flip to STEAM within ~1s of contact.
+			320f, -1f, -1f, -1f,
 			// ptype_boil_product: water -> STEAM (=3); others disabled
 			3f, -1f, -1f, -1f,
-			// ptype_condense_point: steam condenses below 320K (above ambient 300K so
-			// the cooling clamp at ambient doesn't immediately re-trigger boil/condense)
-			-1f, -1f, -1f, 320f,
-			// ptype_condense_product: steam -> WATER (=0); others disabled
-			-1f, -1f, -1f, 0f);
+			// ptype_condense_point: disabled across the board (steam previously
+			// re-condensed below 320K, but user wants boiled vapour to stay
+			// vapour — keep the field for future liquids that should reverse).
+			-1f, -1f, -1f, -1f,
+			// ptype_condense_product: all disabled (paired with condense_point)
+			-1f, -1f, -1f, -1f);
 		sph_gpu_.DispatchFrame(frameDt, iterations_per_frame);
 	}
 
 	public override void _Input(InputEvent @event)
 	{
 		if (@event is InputEventMouse mouse)
-		{ mouse_position_ = mouse.Position - Position; mouse_pressed_ = Input.IsMouseButtonPressed(MouseButton.Left); }
+		{ mouse_position_ = mouse.Position - Position; mouse_pressed_ = Input.IsMouseButtonPressed(MouseButton.Left); mouse_right_pressed_ = Input.IsMouseButtonPressed(MouseButton.Right); }
 		if (@event is InputEventKey key && key.Pressed && !key.Echo)
 		{
 			if (key.Keycode == Key.Space) paused_ = !paused_;
@@ -645,7 +695,7 @@ public partial class Ground : StaticBody2D
 		var toon_text = $"Toon: {toon_levels:0}";
 		DrawString(font, new Vector2(rx - font.GetStringSize(toon_text).X, y), toon_text, fontSize: 14, modulate: toon_levels > 0.5f ? Colors.Orange : Colors.Gray);
 		y += lh;
-		var mode_text = fire_mode_ ? "FIRE" : (smoke_mode_ ? "SMOKE" : (spray_mode_ ? "SPRAY" : "GRAB"));
+		var mode_text = fire_mode_ ? "FIRE" : (smoke_mode_ ? "SMOKE" : (spray_mode_ ? "SPRAY (L:water R:fire)" : "GRAB"));
 		var mode_color = fire_mode_ ? Colors.Red : (smoke_mode_ ? Colors.Orange : (spray_mode_ ? Colors.Cyan : Colors.Green));
 		DrawString(font, new Vector2(rx - font.GetStringSize(mode_text).X, y), mode_text, fontSize: 14, modulate: mode_color);
 		y += lh;
