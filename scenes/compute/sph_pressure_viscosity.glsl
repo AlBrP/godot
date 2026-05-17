@@ -154,15 +154,7 @@ vec2 sampleSdfNormal(vec2 localPos, int bodyIdx) {
 }
 
 float pressure_from_density(float density) {
-    // Clamp to non-negative: a fluid has no tensile strength, so an
-    // under-dense (isolated / surface) particle should feel 0 pressure,
-    // not negative. Negative pressure makes shared_pressure with a wet
-    // neighbour balloon to (negative + huge_positive)/2 ~= huge_positive,
-    // which combined with the surface particle's tiny density produces
-    // accelerations >40x gravity and flings splash droplets meters above
-    // the pool. Real water surface tension is a tiny separate force, not
-    // a -3400 pressure pulling the particle into the water.
-    return max(density - target_density, 0.0) * pressure_multiplier;
+    return (density - target_density) * pressure_multiplier;
 }
 
 float near_pressure_from_density(float near_density) {
@@ -292,26 +284,7 @@ void main() {
         }
     }
 
-    // Density floor: surface particles can have my_density << target_density
-    // (~0.001 vs target 0.01). Dividing the pressure force by that tiny
-    // value produces accelerations >10x gravity, reversing velocity in a
-    // single sub-step and flinging surface particles high above the pool.
-    // Capping the denominator at target_density keeps the acceleration in
-    // physically sane range (~1-2x gravity max).
-    vec2 acceleration = pressure_force / max(my_density, target_density);
-    // Hard ceiling on acceleration magnitude. Even with the density floor
-    // and pressure non-neg clamps, the air-water interface produces
-    // ~18000 px/s^2 transients (force is large; my_density only stops the
-    // denominator from blowing up but doesn't shrink the numerator). Cap
-    // at 2x gravity: enough to support a water column against g, but
-    // blocks runaway spikes that fling surface particles meters above
-    // the pool. Water-only — gas types accumulate vorticity / wake forces
-    // below that don't go through this path.
-    if (my_type == PTYPE_WATER) {
-        const float MAX_ACC = 5000.0;
-        float acc_mag = length(acceleration);
-        if (acc_mag > MAX_ACC) acceleration *= MAX_ACC / acc_mag;
-    }
+    vec2 acceleration = pressure_force / my_density;
     float visc_mult = ptype_viscosity[my_type];
     float les_boost = 1.0;
     if (my_type != PTYPE_WATER) {

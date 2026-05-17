@@ -224,13 +224,17 @@ void main() {
     particle_data[pi] = pred.x;
     particle_data[pi + 1] = pred.y;
 
-    // Compute grid cell and hash from p (not pred). Hashing on pred means
-    // the hash key jumps every time velocity changes direction, which is
-    // common for old smoke particles in the sparse top of the plume (few
-    // SPH neighbours -> noisy pressure -> v shimmers). The metaball SDF
-    // sees pdata.rg = p + offset, so aligning hash to p eliminates the
-    // pred-vs-p drift that caused sliced lobes and per-frame flicker.
-    ivec2 cell = ivec2(floor(p * grid_cell_inverse));
+    // Compute grid cell and hash from PREDICTED position so the spatial-
+    // hash neighbour lookup is consistent with where sph_density and
+    // sph_pressure_viscosity actually sample distances from. Hashing on p
+    // when pred has already drifted into an adjacent cell makes high-velocity
+    // particles miss legitimate neighbours -> density underestimate ->
+    // pressure underestimate -> grabbed-water blobs go loose and rigid-body
+    // buoyancy drops. Earlier we used p here to fix smoke-side hash drift
+    // flicker, but exp soft-min (order-independent) in metaball.gdshader
+    // makes the smoke pipeline robust to bucket reshuffling now, so pred
+    // is the correct choice again for the fluid solver.
+    ivec2 cell = ivec2(floor(pred * grid_cell_inverse));
     grid_cell_coord[i] = cell;
     hash_values[i] = hash_cell(cell);
 }
