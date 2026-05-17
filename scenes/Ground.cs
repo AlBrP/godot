@@ -590,7 +590,18 @@ public partial class Ground : StaticBody2D
 			0f, fire_temperature, 800f, 500f,
 			// ptype_lifetime: [water=99999, fire=lifetime*0.3, smoke=lifetime*0.5, steam=2.0]
 			// Smoke lifetime halved so the plume is roughly half as tall as before.
-			99999f, particle_lifetime * 0.3f, particle_lifetime * 0.5f, 2.0f);
+			99999f, particle_lifetime * 0.3f, particle_lifetime * 0.5f, 2.0f,
+			// ptype_near_pressure_scale defaults (water=1, fire=0.5, smoke=0.3, steam=0.3)
+			1f, 0.5f, 0.3f, 0.3f,
+			// ptype_boil_point: water boils at 373K, others disabled (-1)
+			373f, -1f, -1f, -1f,
+			// ptype_boil_product: water -> STEAM (=3); others disabled
+			3f, -1f, -1f, -1f,
+			// ptype_condense_point: steam condenses below 320K (above ambient 300K so
+			// the cooling clamp at ambient doesn't immediately re-trigger boil/condense)
+			-1f, -1f, -1f, 320f,
+			// ptype_condense_product: steam -> WATER (=0); others disabled
+			-1f, -1f, -1f, 0f);
 		sph_gpu_.DispatchFrame(frameDt, iterations_per_frame);
 	}
 

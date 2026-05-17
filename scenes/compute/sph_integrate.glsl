@@ -72,9 +72,14 @@ layout(set = 0, binding = 7, std140) uniform Params {
     vec4 ptype_init_temp;
     vec4 ptype_lifetime;
     vec4 ptype_near_pressure_scale;
+    vec4 ptype_boil_point;
+    vec4 ptype_boil_product;
+    vec4 ptype_condense_point;
+    vec4 ptype_condense_product;
 };
 
 int vel_offset(int i) { return particle_count * 2 + i * 2; }
+int temperature_offset(int i) { return particle_count * 8 + i; }
 int age_offset(int i) { return particle_count * 9 + i; }
 int type_offset(int i) { return particle_count * 10 + i; }
 
@@ -123,6 +128,37 @@ void main() {
     if (p.y < bounds_min.y) { p.y = bounds_min.y; v.y *= -collision_damping; }
     else if (p.y > bounds_max.y) { p.y = bounds_max.y; v.y *= -collision_damping; }
 
+    // Phase transition: temperature crossing a threshold rewrites the
+    // particle's type, letting the ptype tables (stiffness, buoyancy,
+    // cooling, lifetime, ...) flip to the new phase next frame. age and
+    // temperature are kept so the new phase inherits kinematics smoothly;
+    // resetting age=0 would let forces_hash re-init temperature to the
+    // new ptype_init_temp, undoing the threshold crossing.
+    float my_temp = particle_data[temperature_offset(i)];
+    int new_type = my_type;
+    float boil_pt = ptype_boil_point[my_type];
+    if (boil_pt > 0.0 && my_temp >= boil_pt) {
+        int b = int(ptype_boil_product[my_type] + 0.5);
+        if (b >= 0 && b < 4) new_type = b;
+    }
+    float cond_pt = ptype_condense_point[my_type];
+    if (cond_pt > 0.0 && my_temp <= cond_pt) {
+        int c = int(ptype_condense_product[my_type] + 0.5);
+        if (c >= 0 && c < 4) new_type = c;
+    }
+    if (new_type != my_type) {
+        particle_data[type_offset(i)] = float(new_type);
+        // Bump age past the forces_hash "freshly spawned" window
+        // (my_age < sub_dt*3) so the new type's init_temp doesn't
+        // overwrite my_temp next frame and undo the threshold crossing.
+        // WATER particles in particular sit at age=0 forever (WATER skips
+        // the age++ in this pass), so without this any water->steam
+        // transition would be re-initialised to 500K immediately.
+        int ai = age_offset(i);
+        particle_data[ai] = max(particle_data[ai], sub_dt * 5.0);
+        my_type = new_type;
+    }
+
     // Gas particle lifecycle
     if (my_type != PTYPE_WATER) {
         int ai = age_offset(i);
@@ -136,6 +172,18 @@ void main() {
             particle_data[ti] = 0.0;
         }
     }
+
+    // Clamp velocity to max_vel to prevent runaway from pressure spikes.
+    // High-speed spray particles (~2000 px/s) smashing into the water pool
+    // create an instant density imbalance at the air-water interface; the
+    // pressure response (pressure_multiplier=1e6) is large enough that
+    // surface particles can be reversed to enormous upward speeds in one
+    // sub-step and fling far above the surface (no neighbours up there
+    // -> no viscosity damping, only gravity). max_vel was declared in the
+    // Params UBO but never enforced. Doing it here keeps the configured
+    // 2000 px/s cap meaningful.
+    float speed = length(v);
+    if (speed > max_vel) v = v * (max_vel / speed);
 
     particle_data[i * 2] = p.x;
     particle_data[i * 2 + 1] = p.y;
