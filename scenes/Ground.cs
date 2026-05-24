@@ -116,8 +116,345 @@ public partial class Ground : StaticBody2D
 	private Vector2[] last_body_force_ = new Vector2[MAX_BODIES];
 	private const int SDF_SIZE = 64;
 
+	// Waterline-through-body: each body gets a left (xL,yL) and right
+	// (xR,yR) anchor. yL/yR are the median y of the 10 water particles
+	// nearest to the body's outer left/right edge in x distance.
+	// Mapped over [xL..xR] this defines the waterline visually crossing
+	// the body, with the median giving immunity to splash outliers.
+	private struct Waterline { public float xL, yL, xR, yR; public bool valid; }
+	private Waterline[] waterlines_ = new Waterline[MAX_BODIES];
+	// Temporal median over the last N frames of raw yL/yR. EMA tracked the
+	// Akinci boundary eddy's phase (~0.3s period) and the rim oscillated
+	// in sync. A median is immune to periodic noise: even with half the
+	// samples high and half low, the middle one lands on the cycle center.
+	// 30 @ 60Hz = 0.5s window, fully covering the eddy period. Lag is ~0.25s
+	// for body rise/fall, acceptable.
+	private const int WATERLINE_HISTORY = 30;
+	private float[,] waterline_hist_yL_ = new float[MAX_BODIES, WATERLINE_HISTORY];
+	private float[,] waterline_hist_yR_ = new float[MAX_BODIES, WATERLINE_HISTORY];
+	private int[] waterline_hist_count_ = new int[MAX_BODIES];
+	private int[] waterline_hist_idx_ = new int[MAX_BODIES];
+
+	// Returns waterlines in world coordinates (Ground-local + Position).
+	// Output layout for the shader: vec4 per body = (xL, yL, xR, yR);
+	// invalid bodies report all zeros and waterline_valid_mask has the
+	// corresponding bit cleared so the shader can skip them cheaply.
+	public Godot.Collections.Array<Vector4> GetWaterlinesWorld()
+	{
+		var arr = new Godot.Collections.Array<Vector4>();
+		for (int b = 0; b < MAX_BODIES; b++)
+		{
+			if (waterlines_[b].valid)
+			{
+				var w = waterlines_[b];
+				arr.Add(new Vector4(w.xL + Position.X, w.yL + Position.Y,
+				                     w.xR + Position.X, w.yR + Position.Y));
+			}
+			else
+				arr.Add(Vector4.Zero);
+		}
+		return arr;
+	}
+
+	public int GetWaterlineValidMask()
+	{
+		int m = 0;
+		for (int b = 0; b < MAX_BODIES; b++)
+			if (waterlines_[b].valid) m |= (1 << b);
+		return m;
+	}
+
+	// Returns body centers + radii in world coords (vec4 = cx, cy, r, 0).
+	// Shader uses these to test whether a fragment is inside a body, so
+	// the in-body rim/underwater logic only fires on body fragments.
+	public Godot.Collections.Array<Vector4> GetBodiesWorld()
+	{
+		var arr = new Godot.Collections.Array<Vector4>();
+		for (int b = 0; b < MAX_BODIES; b++)
+		{
+			if (body_enabled_[b])
+				arr.Add(new Vector4(body_pos_[b].X + Position.X,
+				                     body_pos_[b].Y + Position.Y,
+				                     sdf_shape_radius_[b], 0));
+			else
+				arr.Add(Vector4.Zero);
+		}
+		return arr;
+	}
+
+	// Generates fake water particles for each body to fill the SPH
+	// cavity. The hex lattice spacing is tuned per body to the local
+	// real-water density: count real water particles in a square window
+	// near the body, estimate the average particle spacing, and use that
+	// for the fake lattice. This keeps the in-body metaball lobe at the
+	// same density as the surrounding pool whether the pool is dense
+	// (compressed by the body's weight) or sparse (post-splash). Each
+	// body gets up to FAKE_MAX_PER_BODY slots; tighter spacing fills
+	// more of them.
+	// Persistent fake-particle pool per body. Each particle is a small
+	// fluid-like proxy that moves continuously frame to frame instead of
+	// being deleted and recreated -- this is what eliminates the visible
+	// flicker around the body's rim.
+	// Position is stored in BODY-LOCAL space (un-rotated body frame), so
+	// translating/rotating the body automatically moves the cluster with
+	// it without re-seeding. fake_pos_local_[b, i] is in pixels relative
+	// to body center; fake_vel_local_[b, i] is local px/s.
+	private const int FAKE_PER_BODY = 80;
+	private const int FAKE_TOTAL = MAX_BODIES * FAKE_PER_BODY;
+	private Vector2[,] fake_pos_local_ = new Vector2[MAX_BODIES, FAKE_PER_BODY];
+	private Vector2[,] fake_vel_local_ = new Vector2[MAX_BODIES, FAKE_PER_BODY];
+	private bool[,] fake_alive_ = new bool[MAX_BODIES, FAKE_PER_BODY];
+	private bool fake_seeded_ = false;
+	// Per-frame step + output. The pool is initialized lazily (first time
+	// a body becomes submerged) and then ONLY moves frame to frame. No
+	// despawn / respawn under normal flow -- a fake only resets if it
+	// drifts WAY out of bounds.
+	//
+	// Forces per fake particle each frame:
+	//   F_home  = pull toward body center (keeps cluster bound when body moves)
+	//   F_sdf   = push along outward SDF normal if it's outside the body+cavity
+	//             (effectively the body's surface tension on the fake)
+	//   F_real  = repulsion from any nearby real water particle (soft Gaussian)
+	//   F_water = push downward if it tries to surface above the waterline
+	// + heavy linear damping to keep them roughly stationary unless pushed.
+	public Godot.Collections.Array<Vector2> GetFakeParticlesWorld()
+	{
+		var arr = new Godot.Collections.Array<Vector2>();
+		const float SDF_PADDING = 1.6f;
+		const float SPACING = 10f;
+		float dt = Mathf.Min((float)GetProcessDeltaTime(), 1f / 30f);
+		if (!fake_seeded_) { SeedFakePoolInitial(SDF_PADDING, SPACING); fake_seeded_ = true; }
+
+		for (int b = 0; b < MAX_BODIES; b++)
+		{
+			// Submerged gate (same as before): valid waterline + waterline
+			// reasonably close to body + body bottom below waterline.
+			bool submerged = false;
+			float water_y_flat = 0f;
+			float cx = 0f, cy = 0f, ang = 0f;
+			float wlxL = 0f, wlyL = 0f, wlxR = 0f, wlyR = 0f, dx_wl = 1f;
+			if (waterlines_[b].valid && body_enabled_[b])
+			{
+				var w = waterlines_[b];
+				cx = body_pos_[b].X + Position.X;
+				cy = body_pos_[b].Y + Position.Y;
+				ang = body_angle_[b];
+				float bound = Mathf.Max(sdf_half_extents_[b].X, sdf_half_extents_[b].Y) / SDF_PADDING;
+				wlxL = w.xL + Position.X; wlyL = w.yL + Position.Y;
+				wlxR = w.xR + Position.X; wlyR = w.yR + Position.Y;
+				dx_wl = Mathf.Max(wlxR - wlxL, 0.001f);
+				water_y_flat = (wlyL + wlyR) * 0.5f;
+				bool near_enough = Mathf.Abs(water_y_flat - cy) < bound * 2.5f;
+				bool body_in_water = (cy + bound) > water_y_flat;
+				submerged = near_enough && body_in_water;
+			}
+
+			if (submerged)
+			{
+				const float CAVITY_MAX = 15f;
+				float ca = Mathf.Cos(-ang), sa = Mathf.Sin(-ang);
+				float ca2 = Mathf.Cos(ang), sa2 = Mathf.Sin(ang);
+				// Stable per-body grid index for body-local sampling: body's
+				// own SDF data (CPU) and the real-water rejection.
+				for (int i = 0; i < FAKE_PER_BODY; i++)
+				{
+					if (!fake_alive_[b, i])
+					{
+						RespawnFake(b, i, SDF_PADDING);
+					}
+					Vector2 lp = fake_pos_local_[b, i];
+					Vector2 lv = fake_vel_local_[b, i];
+
+					Vector2 force_local = Vector2.Zero;
+
+					// F_sdf: keep inside body+cavity.
+					float d = SampleSdfCpu(b, lp);
+					const float SDF_BOUNDARY = 12f;
+					if (d > -SDF_BOUNDARY)
+					{
+						Vector2 grad = SampleSdfGradient(b, lp, 1.5f);
+						float push_mag = Mathf.Max(0f, d + SDF_BOUNDARY) * 12f;
+						if (d > 0f) push_mag += d * 14f;
+						force_local -= grad * push_mag;
+					}
+
+					// F_self: pair-wise repulsion between fakes within the same body.
+					const float R_SELF = 16f;
+					const float R_SELF_SQ = R_SELF * R_SELF;
+					Vector2 self_repel = Vector2.Zero;
+					for (int j = 0; j < FAKE_PER_BODY; j++)
+					{
+						if (j == i) continue;
+						if (!fake_alive_[b, j]) continue;
+						Vector2 op = fake_pos_local_[b, j];
+						float ox = lp.X - op.X;
+						if (ox > R_SELF || ox < -R_SELF) continue;
+						float oy = lp.Y - op.Y;
+						if (oy > R_SELF || oy < -R_SELF) continue;
+						float r2 = ox * ox + oy * oy;
+						if (r2 > R_SELF_SQ || r2 < 0.01f) continue;
+						float r = Mathf.Sqrt(r2);
+						float strength = (R_SELF - r) * 25f;
+						self_repel.X += ox / r * strength;
+						self_repel.Y += oy / r * strength;
+					}
+					force_local += self_repel;
+
+					// F_water: hard position clamp to waterline.
+					// Works for any rotation angle.
+					{
+						float wy_pre = cy + sa2 * lp.X + ca2 * lp.Y;
+						if (wy_pre < water_y_flat - 1f)
+						{
+						float target_wy = water_y_flat - 1f;
+						// ca2 = 0 at +/-90 deg rotation: lp.Y barely affects
+						// world Y, so clamp lp.X via sa2 instead.
+						if (Mathf.Abs(ca2) > 0.001f)
+						{
+						float new_ly = (target_wy - cy - sa2 * lp.X) / ca2;
+						lp.Y = new_ly;
+						}
+						else
+						{
+						float new_lx = (target_wy - cy - ca2 * lp.Y) / sa2;
+						lp.X = new_lx;
+						}
+						if (lv.Y > 0f) lv.Y = 0f;
+						}
+					}
+
+					// Recompute world position AFTER waterline clamp so
+					// F_real uses the corrected position.
+					float wx = cx + ca2 * lp.X - sa2 * lp.Y;
+					float wy = cy + sa2 * lp.X + ca2 * lp.Y;
+
+					// F_real: repulsion from nearby real water particles.
+					const float R_REPEL = 11f;
+					const float R_REPEL_SQ = R_REPEL * R_REPEL;
+					Vector2 repel_world = Vector2.Zero;
+					for (int pi = 0; pi < ball_nums_; pi++)
+					{
+						if (particle_types_[pi] != 0) continue;
+						float rx = (pos_[pi].X + Position.X) - wx;
+						if (rx > R_REPEL || rx < -R_REPEL) continue;
+						float ry = (pos_[pi].Y + Position.Y) - wy;
+						if (ry > R_REPEL || ry < -R_REPEL) continue;
+						float r2 = rx * rx + ry * ry;
+						if (r2 > R_REPEL_SQ || r2 < 0.01f) continue;
+						float r = Mathf.Sqrt(r2);
+						float strength = (R_REPEL - r) * 12f;
+						repel_world.X -= rx / r * strength;
+						repel_world.Y -= ry / r * strength;
+					}
+					Vector2 repel_local = new Vector2(
+						ca * repel_world.X - sa * repel_world.Y,
+						sa * repel_world.X + ca * repel_world.Y);
+					force_local += repel_local;
+
+					// Integrate.
+					lv += force_local * dt;
+					lv *= Mathf.Max(0f, 1f - 3f * dt);
+					float sp = lv.Length();
+					if (sp > 140f) lv = lv * (140f / sp);
+					lp += lv * dt;
+
+					// Hard SDF clamp: safety net when integration carries
+					// the fake past the body surface. Always recompute the
+					// gradient at the post-integration position.
+					float d_post = SampleSdfCpu(b, lp);
+					if (d_post > CAVITY_MAX)
+					{
+						Vector2 n = SampleSdfGradient(b, lp, 1.5f);
+						lp -= n * (d_post - CAVITY_MAX);
+						float vn = lv.X * n.X + lv.Y * n.Y;
+						if (vn > 0f) lv -= n * vn;
+					}
+
+					fake_pos_local_[b, i] = lp;
+					fake_vel_local_[b, i] = lv;
+
+					float bound2 = Mathf.Max(sdf_half_extents_[b].X, sdf_half_extents_[b].Y) / SDF_PADDING + 30f + CAVITY_MAX;
+					if (lp.X * lp.X + lp.Y * lp.Y > bound2 * bound2) fake_alive_[b, i] = false;
+
+					float owx = cx + ca2 * lp.X - sa2 * lp.Y;
+					float owy = cy + sa2 * lp.X + ca2 * lp.Y;
+					arr.Add(new Vector2(owx, owy));
+				}
+			}
+			else
+			{
+				// Body not submerged: output sentinel (so shader skips fake
+				// for this body) but KEEP the existing pos/vel intact. If we
+				// mark them dead, the next submersion event re-spawns all
+				// 60 fakes at body center with zero velocity, and then
+				// F_water slams them collectively into the body's lower
+				// half (visible as "fakes cluster at the bottom" right
+				// after re-entry). Keeping positions means fakes are still
+				// nicely spread inside the body when it re-enters water.
+				for (int i = 0; i < FAKE_PER_BODY; i++)
+				{
+					arr.Add(new Vector2(-1e6f, -1e6f));
+				}
+			}
+		}
+		return arr;
+	}
+
+	// Initialize fake pool: drop FAKE_PER_BODY particles spread inside each
+	// body's true interior on a coarse jittered grid, zero velocity.
+	private void SeedFakePoolInitial(float sdfPadding, float spacing)
+	{
+		var rng = new System.Random(12345);
+		for (int b = 0; b < MAX_BODIES; b++)
+			for (int i = 0; i < FAKE_PER_BODY; i++) RespawnFake(b, i, sdfPadding, rng);
+	}
+
+	private System.Random respawn_rng_ = new System.Random(67890);
+	private void RespawnFake(int b, int i, float sdfPadding, System.Random rng = null)
+	{
+		var r = rng ?? respawn_rng_;
+		float ex = sdf_half_extents_[b].X / sdfPadding;
+		float ey = sdf_half_extents_[b].Y / sdfPadding;
+		// Rejection-sample inside the body. Most bodies are convex so this
+		// terminates in a handful of tries.
+		for (int t = 0; t < 16; t++)
+		{
+			float lx = ((float)r.NextDouble() * 2f - 1f) * ex;
+			float ly = ((float)r.NextDouble() * 2f - 1f) * ey;
+			if (SampleSdfCpu(b, new Vector2(lx, ly)) < -2f)
+			{
+				fake_pos_local_[b, i] = new Vector2(lx, ly);
+				fake_vel_local_[b, i] = Vector2.Zero;
+				fake_alive_[b, i] = true;
+				return;
+			}
+		}
+		// Fallback: dead center.
+		fake_pos_local_[b, i] = Vector2.Zero;
+		fake_vel_local_[b, i] = Vector2.Zero;
+		fake_alive_[b, i] = true;
+	}
+
+	// Tight candidate set: only the very top of the water column near the
+	// body edge. Pick N_PICK=10, drop none, average the top K_TOP=2 as
+	// the surface layer. Temporal median over WATERLINE_HISTORY frames
+	// rejects the periodic Akinci boundary eddy noise -- see the history
+	// buffer below.
+	private const int WATERLINE_N_PICK = 10;
+	private const int WATERLINE_K_SKIP = 0;
+	private const int WATERLINE_K_TOP  = 2;
+	// Independent debug toggles:
+	//   show_fake_debug_      — green dots at fake-particle positions (J toggles body, fake dots stay)
+	//   show_waterline_debug_ — yellow waterline anchors + magenta/cyan top candidate circles
+	private bool show_fake_debug_ = true;
+	private bool show_waterline_debug_ = false;
+	[Export] public Vector2 WaterlineDebugOffset { get; set; } = Vector2.Zero;
+	private Vector2[,] waterline_picks_left_ = new Vector2[MAX_BODIES, WATERLINE_N_PICK];
+	private Vector2[,] waterline_picks_right_ = new Vector2[MAX_BODIES, WATERLINE_N_PICK];
+
 	public override void _Ready()
 	{
+		ProcessMode = ProcessModeEnum.Always;
 		var vs = GetViewportRect().Size;
 		bounds_min_ = new Vector2(BOUND_MARGIN, BOUND_MARGIN);
 		bounds_max_ = new Vector2(vs.X - BOUND_MARGIN, vs.Y - 100f);
@@ -258,6 +595,56 @@ public partial class Ground : StaticBody2D
 		AddChild(w);
 	}
 
+	// Bilinear sample of the CPU-side SDF for body b at the given LOCAL
+	// (body-relative, un-rotated) position. Returns +infinity-ish outside
+	// the texture window so callers can treat "out of range" as far away.
+	// d < 0 means inside the shape, d > 0 means outside (in pixels).
+	private float SampleSdfCpu(int b, Vector2 localPos)
+	{
+		float ex = sdf_half_extents_[b].X, ey = sdf_half_extents_[b].Y;
+		if (ex <= 0f || ey <= 0f) return 1e6f;
+		float u = (localPos.X / ex * 0.5f + 0.5f) * SDF_SIZE - 0.5f;
+		float v = (localPos.Y / ey * 0.5f + 0.5f) * SDF_SIZE - 0.5f;
+		if (u < 0f || v < 0f || u > SDF_SIZE - 1f || v > SDF_SIZE - 1f) return 1e6f;
+		int u0 = (int)Mathf.Floor(u);
+		int v0 = (int)Mathf.Floor(v);
+		int u1 = Mathf.Min(u0 + 1, SDF_SIZE - 1);
+		int v1 = Mathf.Min(v0 + 1, SDF_SIZE - 1);
+		float fu = u - u0, fv = v - v0;
+		var sdf = sdf_data_[b];
+		float d00 = sdf[v0 * SDF_SIZE + u0];
+		float d10 = sdf[v0 * SDF_SIZE + u1];
+		float d01 = sdf[v1 * SDF_SIZE + u0];
+		float d11 = sdf[v1 * SDF_SIZE + u1];
+		float d0 = d00 + (d10 - d00) * fu;
+		float d1 = d01 + (d11 - d01) * fu;
+		return d0 + (d1 - d0) * fv;
+	}
+
+	// SDF gradient with sample clamping to avoid texture-boundary artifacts.
+	// Falls back to body-center direction when the gradient is degenerate.
+	private Vector2 SampleSdfGradient(int b, Vector2 localPos, float eps)
+	{
+		float ex = sdf_half_extents_[b].X, ey = sdf_half_extents_[b].Y;
+		float clampX = Mathf.Max(ex * 0.97f, 1f);
+		float clampY = Mathf.Max(ey * 0.97f, 1f);
+		float xp = Mathf.Clamp(localPos.X + eps, -clampX, clampX);
+		float xm = Mathf.Clamp(localPos.X - eps, -clampX, clampX);
+		float yp = Mathf.Clamp(localPos.Y + eps, -clampY, clampY);
+		float ym = Mathf.Clamp(localPos.Y - eps, -clampY, clampY);
+		float gx = SampleSdfCpu(b, new Vector2(xp, localPos.Y))
+		         - SampleSdfCpu(b, new Vector2(xm, localPos.Y));
+		float gy = SampleSdfCpu(b, new Vector2(localPos.X, yp))
+		         - SampleSdfCpu(b, new Vector2(localPos.X, ym));
+		float gl = Mathf.Sqrt(gx * gx + gy * gy);
+		if (gl > 0.001f) return new Vector2(gx / gl, gy / gl);
+		// Degenerate gradient (e.g. outside SDF domain) — fall back to
+		// body-center direction so the particle is at least pulled inward.
+		float dl = localPos.Length();
+		if (dl > 0.001f) return -localPos / dl;
+		return new Vector2(0f, -1f);
+	}
+
 	private void GenerateSdfCircle(int bodyIdx, float radius, float padding = 1.6f)
 	{
 		sdf_shape_radius_[bodyIdx] = radius;
@@ -367,14 +754,15 @@ public partial class Ground : StaticBody2D
 				float px = BitConverter.ToSingle(gpuData, i * 8);
 				float py = BitConverter.ToSingle(gpuData, i * 8 + 4);
 				pos_[i] = new Vector2(px, py);
-				particle_sprites_[i].Position = Position + pos_[i];
+				particle_sprites_[i].Position = pos_[i];
 				// Color by type: water=blue, fire=red, smoke=gray, steam=white.
 				// type field is stored as float in the particle buffer (so the
 				// shader can index ptype tables uniformly), so read it as a
 				// float and cast. ToInt32 on those 4 bytes would interpret the
 				// IEEE-754 bit pattern as an integer (fire=1.0 -> 0x3F800000 ->
-				// int 1065353216 ≠ 1) — that's why everything looked blue.
+				// int 1065353216 != 1) - that's why everything looked blue.
 				int ptype = (int)BitConverter.ToSingle(gpuData, ball_nums_ * 40 + i * 4);
+				particle_types_[i] = ptype;
 				if (ptype == 1) particle_sprites_[i].Modulate = new Color(1f, 0.3f, 0.05f, 0.8f);
 				else if (ptype == 2) particle_sprites_[i].Modulate = new Color(0.6f, 0.6f, 0.6f, 0.8f);
 				else if (ptype == 3) particle_sprites_[i].Modulate = new Color(0.9f, 0.9f, 1f, 0.8f);
@@ -385,9 +773,21 @@ public partial class Ground : StaticBody2D
 		}
 		else
 		{
+			// Lightweight readback just for waterline computation (pos + type).
+			// Same call as debug_sprites_ path but result is consumed only
+			// for the waterline; no sprite update.
+			byte[] gpuData2 = sph_gpu_.ReadBackParticleBuffer();
+			for (int i = 0; i < ball_nums_; i++)
+			{
+				pos_[i].X = BitConverter.ToSingle(gpuData2, i * 8);
+				pos_[i].Y = BitConverter.ToSingle(gpuData2, i * 8 + 4);
+				particle_types_[i] = (int)BitConverter.ToSingle(gpuData2, ball_nums_ * 40 + i * 4);
+			}
 			SetParticleSpritesVisible(false);
 			colorRect_.Visible = true;
 		}
+
+		ComputeWaterlines();
 
 		QueueRedraw();
 
@@ -581,6 +981,144 @@ public partial class Ground : StaticBody2D
 		}
 	}
 
+	// Compute per-body waterline anchors (left + right). For each side
+	// we look at water particles in a narrow x-band just outside the
+	// body, pick the K with smallest y (highest in Y-down) and take
+	// their median y. "x-nearest" was wrong: the water pool is a 2D
+	// volume, so the 10 particles nearest the body's edge in x include
+	// the full water column from surface to floor and the median lands
+	// mid-pool. "Highest in a narrow band" anchors on the actual surface;
+	// the median over K=10 still rejects a few splash outliers.
+	private void ComputeWaterlines()
+	{
+		// Sample band sits 10-35px out from the body edge. The first
+		// ~smoothing_radius (17px) ring next to the body is the strongest
+		// Akinci boundary-eddy zone -- water there circulates around the
+		// body, so picking "top" particles from that ring tracks the eddy
+		// phase (~0.3s cycle) and the rim wobbles up/down by ±5-10px.
+		// Push the window past the eddy core to sample relatively
+		// undisturbed surface, while staying close enough that the
+		// anchor still tracks the local pile around the body.
+		const float BAND_INNER = 10f;
+		const float BAND_OUTER = 35f;
+		// Pick N_PICK highest particles (smallest y in Y-down). Sort by y
+		// and drop the top K_SKIP as splash outliers, take median of rest.
+		float[] yL_top = new float[WATERLINE_N_PICK];
+		float[] xL_top = new float[WATERLINE_N_PICK];
+		float[] yR_top = new float[WATERLINE_N_PICK];
+		float[] xR_top = new float[WATERLINE_N_PICK];
+
+		for (int b = 0; b < MAX_BODIES; b++)
+		{
+			waterlines_[b].valid = false;
+			if (!body_enabled_[b]) continue;
+
+			float bx = body_pos_[b].X;
+			// Per-body horizontal half-width: box bodies are wider than
+			// circles, so use sdf_half_extents (unpadded) to anchor the
+			// left/right windows. Avoids the box's flat top getting
+			// candidates from inside its footprint.
+			const float SDF_PAD_W = 1.6f;
+			float hw_body = sdf_half_extents_[b].X / SDF_PAD_W;
+			float xL = bx - hw_body;
+			float xR = bx + hw_body;
+
+			int nL = 0, nR = 0;
+			float worstL_y = float.NegativeInfinity; int worstL_i = 0;
+			float worstR_y = float.NegativeInfinity; int worstR_i = 0;
+
+			for (int i = 0; i < ball_nums_; i++)
+			{
+				if (particle_types_[i] != 0) continue;
+				float px = pos_[i].X;
+				float py = pos_[i].Y;
+				if (py < -500f) continue;
+				if (px < xL - BAND_INNER && px >= xL - BAND_OUTER)
+				{
+					if (nL < WATERLINE_N_PICK)
+					{
+						yL_top[nL] = py; xL_top[nL] = px;
+						if (py > worstL_y) { worstL_y = py; worstL_i = nL; }
+						nL++;
+						if (nL == WATERLINE_N_PICK)
+						{
+							worstL_y = yL_top[0]; worstL_i = 0;
+							for (int j = 1; j < WATERLINE_N_PICK; j++) if (yL_top[j] > worstL_y) { worstL_y = yL_top[j]; worstL_i = j; }
+						}
+					}
+					else if (py < worstL_y)
+					{
+						yL_top[worstL_i] = py; xL_top[worstL_i] = px;
+						worstL_y = yL_top[0]; worstL_i = 0;
+						for (int j = 1; j < WATERLINE_N_PICK; j++) if (yL_top[j] > worstL_y) { worstL_y = yL_top[j]; worstL_i = j; }
+					}
+				}
+				else if (px > xR + BAND_INNER && px <= xR + BAND_OUTER)
+				{
+					if (nR < WATERLINE_N_PICK)
+					{
+						yR_top[nR] = py; xR_top[nR] = px;
+						if (py > worstR_y) { worstR_y = py; worstR_i = nR; }
+						nR++;
+						if (nR == WATERLINE_N_PICK)
+						{
+							worstR_y = yR_top[0]; worstR_i = 0;
+							for (int j = 1; j < WATERLINE_N_PICK; j++) if (yR_top[j] > worstR_y) { worstR_y = yR_top[j]; worstR_i = j; }
+						}
+					}
+					else if (py < worstR_y)
+					{
+						yR_top[worstR_i] = py; xR_top[worstR_i] = px;
+						worstR_y = yR_top[0]; worstR_i = 0;
+						for (int j = 1; j < WATERLINE_N_PICK; j++) if (yR_top[j] > worstR_y) { worstR_y = yR_top[j]; worstR_i = j; }
+					}
+				}
+			}
+
+			if (nL < WATERLINE_N_PICK || nR < WATERLINE_N_PICK) continue;
+
+			// Sort y ascending (smallest = highest in Y-down). Drop the
+			// first K_SKIP (splash outliers). Average the next K_TOP -- the
+			// surface layer mean -- instead of taking the median which falls
+			// into layer-2 when the surface is only 1-2 particles thick.
+			float[] sortL = new float[WATERLINE_N_PICK];
+			Array.Copy(yL_top, sortL, WATERLINE_N_PICK); Array.Sort(sortL);
+			float sumL = 0f;
+			for (int j = WATERLINE_K_SKIP; j < WATERLINE_K_SKIP + WATERLINE_K_TOP; j++) sumL += sortL[j];
+			float medL = sumL / WATERLINE_K_TOP;
+
+			float[] sortR = new float[WATERLINE_N_PICK];
+			Array.Copy(yR_top, sortR, WATERLINE_N_PICK); Array.Sort(sortR);
+			float sumR = 0f;
+			for (int j = WATERLINE_K_SKIP; j < WATERLINE_K_SKIP + WATERLINE_K_TOP; j++) sumR += sortR[j];
+			float medR = sumR / WATERLINE_K_TOP;
+
+			waterlines_[b].xL = xL;
+			waterlines_[b].xR = xR;
+			// Push raw median into ring buffer, then take temporal median
+			// over the window. Filters the periodic boundary-eddy noise.
+			int hi = waterline_hist_idx_[b];
+			waterline_hist_yL_[b, hi] = medL;
+			waterline_hist_yR_[b, hi] = medR;
+			waterline_hist_idx_[b] = (hi + 1) % WATERLINE_HISTORY;
+			if (waterline_hist_count_[b] < WATERLINE_HISTORY) waterline_hist_count_[b]++;
+			int hc = waterline_hist_count_[b];
+			float[] hyL = new float[hc];
+			float[] hyR = new float[hc];
+			for (int j = 0; j < hc; j++) { hyL[j] = waterline_hist_yL_[b, j]; hyR[j] = waterline_hist_yR_[b, j]; }
+			Array.Sort(hyL); Array.Sort(hyR);
+			waterlines_[b].yL = hc % 2 == 1 ? hyL[hc / 2] : (hyL[hc / 2 - 1] + hyL[hc / 2]) * 0.5f;
+			waterlines_[b].yR = hc % 2 == 1 ? hyR[hc / 2] : (hyR[hc / 2 - 1] + hyR[hc / 2]) * 0.5f;
+			waterlines_[b].valid = true;
+
+			for (int j = 0; j < WATERLINE_N_PICK; j++)
+			{
+				waterline_picks_left_[b, j]  = new Vector2(xL_top[j], yL_top[j]);
+				waterline_picks_right_[b, j] = new Vector2(xR_top[j], yR_top[j]);
+			}
+		}
+	}
+
 	private void DispatchGpu(float frameDt, float subDt)
 	{
 		var bodies = new SphGpu.BodyInfo[MAX_BODIES];
@@ -651,7 +1189,13 @@ public partial class Ground : StaticBody2D
 			// vapour — keep the field for future liquids that should reverse).
 			-1f, -1f, -1f, -1f,
 			// ptype_condense_product: all disabled (paired with condense_point)
-			-1f, -1f, -1f, -1f);
+			-1f, -1f, -1f, -1f,
+			// Akinci 2012 boundary friction: damps tangential component of
+			// water velocity relative to a body's surface so gravity doesn't
+			// drive sliding around the submerged surface. 0.5 = 50% damp at
+			// the surface, fades to 0 at smoothing_radius. Tangential only,
+			// so buoyancy (normal pressure response) is preserved.
+			0.5f);
 		sph_gpu_.DispatchFrame(frameDt, iterations_per_frame);
 	}
 
@@ -661,7 +1205,7 @@ public partial class Ground : StaticBody2D
 		{ mouse_position_ = mouse.Position - Position; mouse_pressed_ = Input.IsMouseButtonPressed(MouseButton.Left); mouse_right_pressed_ = Input.IsMouseButtonPressed(MouseButton.Right); }
 		if (@event is InputEventKey key && key.Pressed && !key.Echo)
 		{
-			if (key.Keycode == Key.Space) paused_ = !paused_;
+			if (key.Keycode == Key.Space) { paused_ = !paused_; GetTree().Paused = paused_; }
 			if (key.Keycode == Key.H) spec_strength = spec_strength > 0.01f ? 0f : 0.5f;
 			if (key.Keycode == Key.T) toon_levels = toon_levels < 0.5f ? 4f : 0f;
 			if (key.Keycode == Key.V) { show_sliders_ = !show_sliders_; if (slider_panel_ != null) slider_panel_.Visible = show_sliders_; }
@@ -671,6 +1215,15 @@ public partial class Ground : StaticBody2D
 			if (key.Keycode == Key.G) { debug_sprites_ = !debug_sprites_; SetParticleSpritesVisible(debug_sprites_); }
 			if (key.Keycode == Key.N && body_count_ > 0) { current_body_ = (current_body_ + 1) % body_count_; SwitchSdfShape(); }
 			if (key.Keycode == Key.B) { spray_mode_ = !spray_mode_; ResetParticles(); sph_gpu_.ResetParticles(pos_, vel_, Position); }
+			if (key.Keycode == Key.J)
+			{
+				// Hide body polygons so the fake-particle distribution is
+				// directly visible against the water render. Toggles all 4.
+				for (int bi = 0; bi < MAX_BODIES; bi++)
+					if (body_visual_[bi] != null) body_visual_[bi].Visible = !body_visual_[bi].Visible;
+			}
+			if (key.Keycode == Key.K) show_waterline_debug_ = !show_waterline_debug_;
+			if (key.Keycode == Key.L) show_fake_debug_ = !show_fake_debug_;
 		}
 	}
 
@@ -730,6 +1283,44 @@ public partial class Ground : StaticBody2D
 			var ft_text = $"F{ft.Length():0}";
 			DrawString(font, new Vector2(body_pos_[b].X - 30, body_pos_[b].Y - sdf_shape_radius_[b] - 22), ft_text, fontSize: 13,
 				modulate: ft.LengthSquared() > 1f ? Colors.Yellow : Colors.Gray);
+		}
+
+		// Debug overlays (toggled via L/K).
+		Vector2 dbgOff = WaterlineDebugOffset;
+		if (show_fake_debug_)
+		{
+			var fakes = GetFakeParticlesWorld();
+			foreach (var fp in fakes)
+			{
+				if (fp.X < -1e5f) continue;
+				DrawCircle(fp - Position + dbgOff, 3f, new Color(0f, 1f, 0f, 0.9f));
+			}
+		}
+		if (show_waterline_debug_)
+		{
+			Vector2 off = dbgOff;
+			for (int b = 0; b < MAX_BODIES; b++)
+			{
+				if (!waterlines_[b].valid) continue;
+				var w = waterlines_[b];
+				DrawLine(new Vector2(w.xL, w.yL) + off, new Vector2(w.xR, w.yR) + off, Colors.Yellow, 2f);
+				DrawCircle(new Vector2(w.xL, w.yL) + off, 4f, Colors.Yellow);
+				DrawCircle(new Vector2(w.xR, w.yR) + off, 4f, Colors.Yellow);
+
+				int[] orderL = new int[WATERLINE_N_PICK];
+				int[] orderR = new int[WATERLINE_N_PICK];
+				for (int j = 0; j < WATERLINE_N_PICK; j++) { orderL[j] = j; orderR[j] = j; }
+				Array.Sort(orderL, (a, c) => waterline_picks_left_[b, a].Y.CompareTo(waterline_picks_left_[b, c].Y));
+				Array.Sort(orderR, (a, c) => waterline_picks_right_[b, a].Y.CompareTo(waterline_picks_right_[b, c].Y));
+
+				for (int rank = 0; rank < WATERLINE_N_PICK; rank++)
+				{
+					bool dropped = rank < WATERLINE_K_SKIP;
+					float a = dropped ? 0.25f : 0.9f;
+					DrawCircle(waterline_picks_left_[b,  orderL[rank]] + off, 5f, new Color(1, 0, 1, a), false, 1.5f);
+					DrawCircle(waterline_picks_right_[b, orderR[rank]] + off, 5f, new Color(0, 1, 1, a), false, 1.5f);
+				}
+			}
 		}
 	}
 }
