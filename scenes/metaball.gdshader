@@ -37,6 +37,18 @@ uniform float color_band = 2.2;     // >1 pushes bands inward (less yellow), <1 
 uniform int debug_mode = 0;
 uniform sampler2D physics_texture;
 
+// Per-body waterline anchors. waterlines_world[b] = (xL, yL, xR, yR)
+// in viewport-world coordinates. valid_mask bit b means body b has a
+// usable waterline this frame. bodies_world[b] = (cx, cy, r, 0) is the
+// body center + radius, used to test whether a fragment is inside.
+const int MAX_BODIES_RIM = 4;
+const int FAKE_PER_BODY = 80;
+const int FAKE_TOTAL = 320; // MAX_BODIES_RIM * FAKE_PER_BODY
+uniform vec4 waterlines_world[4];
+uniform vec4 bodies_world[4];
+uniform int waterline_valid_mask = 0;
+uniform vec2 fake_particles[320];
+
 // Particle type constants
 const int PTYPE_WATER = 0;
 const int PTYPE_FIRE = 1;
@@ -662,6 +674,50 @@ void fragment() {
 		COLOR = vec4(heat, 1.0);
 		drew = true;
 	}
+
+	// Fake-particle contribution: treat fakes identically to real water so
+	// the metaball field is uniform across the body's cavity and the
+	// surrounding pool. No special atten / waterline gate / cavity fill --
+	// fakes plug into the same Gaussian kernel (sigma=inv_2sq, cutoff_sq)
+	// the real-water loop uses, and total_water sees one homogeneous field.
+	// The pool's natural density gradient (foam rim near the surface,
+	// mid-blue deeper) emerges from where the fakes sit relative to the
+	// fragment, just like for real particles.
+	//
+	// FAKE_KERNEL_WEIGHT is a single uniform scale (no positional logic).
+	// 1.0 would treat fakes as one-for-one with real-water particles, but
+	// fake hex spacing is denser (10 px vs SPH ~17 px) AND the cavity is
+	// a single layer of fakes while the pool stacks many layers. The net
+	// per-fragment count inside the cavity ends up roughly matching the
+	// pool's, so a weight modestly below 1 keeps the body's water from
+	// reading darker than the surrounding pool while still filling the
+	// cavity solidly.
+	//
+	// Per-fake self-weight: the outermost ring of fakes (d_fake near +15,
+	// the cavity edge) sits within Gaussian-tail reach of real-water
+	// particles just outside the cavity. Without a fade, the two kernels
+	// double up in d=0..10 and total_water spikes there -- visible as a
+	// dark "fish-tail" lobe under the body. Fading each fake by its own
+	// SDF distance d_fake (1 deep inside, 0 at the edge) cuts this
+	// overlap without removing the fake physically (so cavity dynamics
+	// stay stable) and keeps the kernel formula identical to real water
+	// -- only each fake's "weight" depends on its own state, not on the
+	// fragment's location.
+	const float FAKE_KERNEL_WEIGHT = 0.7;
+	for (int i = 0; i < FAKE_TOTAL; i++) {
+		vec2 fp = fake_particles[i];
+		if (fp.x < -1e5) continue;
+
+		int b = i / FAKE_PER_BODY;
+		float br = bodies_world[b].z;
+		float d_fake = (br > 0.1) ? distance(fp, bodies_world[b].xy) - br : -1e6;
+		float fake_self_weight = 1.0 - smoothstep(0.0, 12.0, d_fake);
+
+		vec2 pdiff = worldPos - fp;
+		total_water += particle_contrib(pdiff, inv_2sq, cutoff_sq) * FAKE_KERNEL_WEIGHT * fake_self_weight;
+	}
+
+
 	if (!drew && total_water > 0.01) {
 		float edge_width = fwidth(total_water) * 1.5;
 		float aa = smoothstep(2.5 - edge_width, 2.5 + edge_width, total_water);
@@ -688,6 +744,7 @@ void fragment() {
 			color = mix(water_bright, water_light, smoothstep(0.05, 0.3, n));
 		}
 
+
 		float rim_blend = 1.0 - smoothstep(3.0, 6.0, total_water);
 		color = mix(color, rim_color, rim_blend * 0.7);
 
@@ -712,5 +769,6 @@ void fragment() {
 		COLOR = vec4(clamp(color, 0.0, 1.0), aa);
 		drew = true;
 	}
+
 	if (!drew) discard;
 }

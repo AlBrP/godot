@@ -29,7 +29,7 @@ public partial class Ground : StaticBody2D
 
 	// Slider panel
 	private bool show_sliders_ = false;
-	private bool debug_sprites_ = false;
+	private bool debug_sprites_ = true;
 	private int debug_mode_ = 0;
 	public int DebugModeVal => debug_mode_;
 	private Panel slider_panel_;
@@ -205,6 +205,16 @@ public partial class Ground : StaticBody2D
 	private Vector2[,] fake_vel_local_ = new Vector2[MAX_BODIES, FAKE_PER_BODY];
 	private bool[,] fake_alive_ = new bool[MAX_BODIES, FAKE_PER_BODY];
 	private bool fake_seeded_ = false;
+	// F_real spatial grid: accelerates fake<->real particle repulsion from
+	// O(FAKE_PER_BODY * N) to O(FAKE_PER_BODY). Grid is rebuilt once per
+	// frame (lazily on first call) and reused across subsequent callers.
+	private float f_real_grid_min_x_, f_real_grid_min_y_;
+	private int f_real_grid_w_, f_real_grid_h_;
+	private const float F_REAL_CELL_SIZE = 11f;
+	private int[] f_real_cell_offsets_;
+	private int[] f_real_cell_counts_;
+	private int[] f_real_particles_;
+	private ulong f_real_grid_frame_ = ulong.MaxValue;
 	// Per-frame step + output. The pool is initialized lazily (first time
 	// a body becomes submerged) and then ONLY moves frame to frame. No
 	// despawn / respawn under normal flow -- a fake only resets if it
@@ -217,6 +227,71 @@ public partial class Ground : StaticBody2D
 	//   F_real  = repulsion from any nearby real water particle (soft Gaussian)
 	//   F_water = push downward if it tries to surface above the waterline
 	// + heavy linear damping to keep them roughly stationary unless pushed.
+	private void BuildFRealSpatialGrid()
+	{
+		float minX = bounds_min_.X + Position.X;
+		float minY = bounds_min_.Y + Position.Y;
+		float maxX = bounds_max_.X + Position.X;
+		float maxY = bounds_max_.Y + Position.Y;
+		int gw = (int)((maxX - minX) / F_REAL_CELL_SIZE) + 2;
+		int gh = (int)((maxY - minY) / F_REAL_CELL_SIZE) + 2;
+		int numCells = gw * gh;
+
+		if (f_real_cell_offsets_ == null || f_real_cell_offsets_.Length != numCells)
+		{
+			f_real_cell_offsets_ = new int[numCells];
+			f_real_cell_counts_ = new int[numCells];
+		}
+		else
+		{
+			Array.Clear(f_real_cell_offsets_, 0, numCells);
+			Array.Clear(f_real_cell_counts_, 0, numCells);
+		}
+		if (f_real_particles_ == null || f_real_particles_.Length < ball_nums_)
+			f_real_particles_ = new int[ball_nums_];
+
+		f_real_grid_w_ = gw;
+		f_real_grid_h_ = gh;
+		f_real_grid_min_x_ = minX;
+		f_real_grid_min_y_ = minY;
+
+		for (int pi = 0; pi < ball_nums_; pi++)
+		{
+			if (particle_types_[pi] != 0) continue;
+			float wx = pos_[pi].X + Position.X;
+			float wy = pos_[pi].Y + Position.Y;
+			int cx = (int)((wx - minX) / F_REAL_CELL_SIZE);
+			int cy = (int)((wy - minY) / F_REAL_CELL_SIZE);
+			if (cx < 0) cx = 0; if (cx >= gw) cx = gw - 1;
+			if (cy < 0) cy = 0; if (cy >= gh) cy = gh - 1;
+			f_real_cell_counts_[cy * gw + cx]++;
+		}
+
+		int total = 0;
+		for (int i = 0; i < numCells; i++)
+		{
+			f_real_cell_offsets_[i] = total;
+			int cnt = f_real_cell_counts_[i];
+			f_real_cell_counts_[i] = 0;
+			total += cnt;
+		}
+
+		for (int pi = 0; pi < ball_nums_; pi++)
+		{
+			if (particle_types_[pi] != 0) continue;
+			float wx = pos_[pi].X + Position.X;
+			float wy = pos_[pi].Y + Position.Y;
+			int cx = (int)((wx - minX) / F_REAL_CELL_SIZE);
+			int cy = (int)((wy - minY) / F_REAL_CELL_SIZE);
+			if (cx < 0) cx = 0; if (cx >= gw) cx = gw - 1;
+			if (cy < 0) cy = 0; if (cy >= gh) cy = gh - 1;
+			int cellIdx = cy * gw + cx;
+			int slot = f_real_cell_offsets_[cellIdx] + f_real_cell_counts_[cellIdx];
+			f_real_particles_[slot] = pi;
+			f_real_cell_counts_[cellIdx]++;
+		}
+	}
+
 	public Godot.Collections.Array<Vector2> GetFakeParticlesWorld()
 	{
 		var arr = new Godot.Collections.Array<Vector2>();
@@ -224,6 +299,13 @@ public partial class Ground : StaticBody2D
 		const float SPACING = 10f;
 		float dt = Mathf.Min((float)GetProcessDeltaTime(), 1f / 30f);
 		if (!fake_seeded_) { SeedFakePoolInitial(SDF_PADDING, SPACING); fake_seeded_ = true; }
+
+		ulong currentFrame = Engine.GetProcessFrames();
+		if (f_real_grid_frame_ != currentFrame)
+		{
+			BuildFRealSpatialGrid();
+			f_real_grid_frame_ = currentFrame;
+		}
 
 		for (int b = 0; b < MAX_BODIES; b++)
 		{
@@ -300,51 +382,62 @@ public partial class Ground : StaticBody2D
 					}
 					force_local += self_repel;
 
-					// F_water: hard position clamp to waterline.
-					// Works for any rotation angle.
+					// F_water: linear + quadratic push so surface fakes settle
+					// 2-4px below waterline. Old above*20 left ~12-15px of
+					// residual lift because F_self (R=16, k=25) on a layer
+					// of neighbours produces ~300-400 px/s^2 upward and a
+					// linear restoring force needs that much "above" to
+					// balance it. Quadratic term hardens response once a
+					// fake drifts more than a couple px above target; no
+					// hard clamp so no teleport / tangential slide.
 					{
 						float wy_pre = cy + sa2 * lp.X + ca2 * lp.Y;
-						if (wy_pre < water_y_flat - 1f)
+						float target_wy = water_y_flat + 2f;
+						float above = target_wy - wy_pre;
+						if (above > 0f)
 						{
-						float target_wy = water_y_flat - 1f;
-						// ca2 = 0 at +/-90 deg rotation: lp.Y barely affects
-						// world Y, so clamp lp.X via sa2 instead.
-						if (Mathf.Abs(ca2) > 0.001f)
-						{
-						float new_ly = (target_wy - cy - sa2 * lp.X) / ca2;
-						lp.Y = new_ly;
-						}
-						else
-						{
-						float new_lx = (target_wy - cy - ca2 * lp.Y) / sa2;
-						lp.X = new_lx;
-						}
-						if (lv.Y > 0f) lv.Y = 0f;
+							float force_wy = above * 60f + above * above * 5f;
+							force_local.X += force_wy * sa2;
+							force_local.Y += force_wy * ca2;
 						}
 					}
 
-					// Recompute world position AFTER waterline clamp so
-					// F_real uses the corrected position.
+					// World position for F_real lookup.
 					float wx = cx + ca2 * lp.X - sa2 * lp.Y;
 					float wy = cy + sa2 * lp.X + ca2 * lp.Y;
 
-					// F_real: repulsion from nearby real water particles.
+					// F_real: repulsion from nearby real water particles (spatial-grid O(1)).
 					const float R_REPEL = 11f;
 					const float R_REPEL_SQ = R_REPEL * R_REPEL;
 					Vector2 repel_world = Vector2.Zero;
-					for (int pi = 0; pi < ball_nums_; pi++)
+					int gc_x = (int)((wx - f_real_grid_min_x_) / F_REAL_CELL_SIZE);
+					int gc_y = (int)((wy - f_real_grid_min_y_) / F_REAL_CELL_SIZE);
+					for (int gdx = -1; gdx <= 1; gdx++)
 					{
-						if (particle_types_[pi] != 0) continue;
-						float rx = (pos_[pi].X + Position.X) - wx;
-						if (rx > R_REPEL || rx < -R_REPEL) continue;
-						float ry = (pos_[pi].Y + Position.Y) - wy;
-						if (ry > R_REPEL || ry < -R_REPEL) continue;
-						float r2 = rx * rx + ry * ry;
-						if (r2 > R_REPEL_SQ || r2 < 0.01f) continue;
-						float r = Mathf.Sqrt(r2);
-						float strength = (R_REPEL - r) * 12f;
-						repel_world.X -= rx / r * strength;
-						repel_world.Y -= ry / r * strength;
+						int cell_x = gc_x + gdx;
+						if (cell_x < 0 || cell_x >= f_real_grid_w_) continue;
+						for (int gdy = -1; gdy <= 1; gdy++)
+						{
+							int cell_y = gc_y + gdy;
+							if (cell_y < 0 || cell_y >= f_real_grid_h_) continue;
+							int cellIdx = cell_y * f_real_grid_w_ + cell_x;
+							int start = f_real_cell_offsets_[cellIdx];
+							int cnt = f_real_cell_counts_[cellIdx];
+							for (int k = 0; k < cnt; k++)
+							{
+								int pi = f_real_particles_[start + k];
+								float rx = (pos_[pi].X + Position.X) - wx;
+								if (rx > R_REPEL || rx < -R_REPEL) continue;
+								float ry = (pos_[pi].Y + Position.Y) - wy;
+								if (ry > R_REPEL || ry < -R_REPEL) continue;
+								float r2 = rx * rx + ry * ry;
+								if (r2 > R_REPEL_SQ || r2 < 0.01f) continue;
+								float r = Mathf.Sqrt(r2);
+								float strength = (R_REPEL - r) * 12f;
+								repel_world.X -= rx / r * strength;
+								repel_world.Y -= ry / r * strength;
+							}
+						}
 					}
 					Vector2 repel_local = new Vector2(
 						ca * repel_world.X - sa * repel_world.Y,
@@ -402,26 +495,56 @@ public partial class Ground : StaticBody2D
 
 	// Initialize fake pool: drop FAKE_PER_BODY particles spread inside each
 	// body's true interior on a coarse jittered grid, zero velocity.
+	// Initial seed: hex lattice for perfectly even distribution so the
+	// very first submersion doesn't cluster particles at body center.
 	private void SeedFakePoolInitial(float sdfPadding, float spacing)
 	{
-		var rng = new System.Random(12345);
 		for (int b = 0; b < MAX_BODIES; b++)
-			for (int i = 0; i < FAKE_PER_BODY; i++) RespawnFake(b, i, sdfPadding, rng);
+		{
+			float ex = sdf_half_extents_[b].X / sdfPadding;
+			float ey = sdf_half_extents_[b].Y / sdfPadding;
+			float hex_h = spacing * 0.8660254f;
+			int cols = (int)(ex * 2f / spacing) + 2;
+			int rows = (int)(ey * 2f / hex_h) + 2;
+			int placed = 0;
+			for (int row = 0; row < rows && placed < FAKE_PER_BODY; row++)
+			{
+				float offset_x = (row % 2 == 0) ? 0f : spacing * 0.5f;
+				for (int col = 0; col < cols && placed < FAKE_PER_BODY; col++)
+				{
+					float lx = -ex + col * spacing + offset_x;
+					float ly = -ey + row * hex_h;
+					if (SampleSdfCpu(b, new Vector2(lx, ly)) < -12f)
+					{
+						fake_pos_local_[b, placed] = new Vector2(lx, ly);
+						fake_vel_local_[b, placed] = Vector2.Zero;
+						fake_alive_[b, placed] = true;
+						placed++;
+					}
+				}
+			}
+			var rng = new System.Random(12345 + b * 1000);
+			for (int i = placed; i < FAKE_PER_BODY; i++) RespawnFake(b, i, sdfPadding, rng);
+		}
 	}
 
 	private System.Random respawn_rng_ = new System.Random(67890);
 	private void RespawnFake(int b, int i, float sdfPadding, System.Random rng = null)
 	{
 		var r = rng ?? respawn_rng_;
-		float ex = sdf_half_extents_[b].X / sdfPadding;
-		float ey = sdf_half_extents_[b].Y / sdfPadding;
-		// Rejection-sample inside the body. Most bodies are convex so this
-		// terminates in a handful of tries.
-		for (int t = 0; t < 16; t++)
+		// Mirror a surviving fake's position so the new particle inherits
+		// the cluster's spatial distribution. When a body re-enters water,
+		// survivors are already pushed below the waterline by F_water --
+		// mirroring places the new particle in the same region instead of
+		// the geometric center (visible as "growing from bottom").
+		for (int mirror = 0; mirror < 10; mirror++)
 		{
-			float lx = ((float)r.NextDouble() * 2f - 1f) * ex;
-			float ly = ((float)r.NextDouble() * 2f - 1f) * ey;
-			if (SampleSdfCpu(b, new Vector2(lx, ly)) < -2f)
+			int src = r.Next(FAKE_PER_BODY);
+			if (!fake_alive_[b, src]) continue;
+			float jitter = 3f;
+			float lx = fake_pos_local_[b, src].X + ((float)r.NextDouble() * 2f - 1f) * jitter;
+			float ly = fake_pos_local_[b, src].Y + ((float)r.NextDouble() * 2f - 1f) * jitter;
+			if (SampleSdfCpu(b, new Vector2(lx, ly)) < -12f)
 			{
 				fake_pos_local_[b, i] = new Vector2(lx, ly);
 				fake_vel_local_[b, i] = Vector2.Zero;
@@ -429,7 +552,22 @@ public partial class Ground : StaticBody2D
 				return;
 			}
 		}
-		// Fallback: dead center.
+		// Fallback: rejection-sample inside the body.
+		float ex = sdf_half_extents_[b].X / sdfPadding;
+		float ey = sdf_half_extents_[b].Y / sdfPadding;
+		for (int t = 0; t < 16; t++)
+		{
+			float lx = ((float)r.NextDouble() * 2f - 1f) * ex;
+			float ly = ((float)r.NextDouble() * 2f - 1f) * ey;
+			if (SampleSdfCpu(b, new Vector2(lx, ly)) < -12f)
+			{
+				fake_pos_local_[b, i] = new Vector2(lx, ly);
+				fake_vel_local_[b, i] = Vector2.Zero;
+				fake_alive_[b, i] = true;
+				return;
+			}
+		}
+		// Last resort: dead center.
 		fake_pos_local_[b, i] = Vector2.Zero;
 		fake_vel_local_[b, i] = Vector2.Zero;
 		fake_alive_[b, i] = true;
@@ -442,7 +580,7 @@ public partial class Ground : StaticBody2D
 	// buffer below.
 	private const int WATERLINE_N_PICK = 10;
 	private const int WATERLINE_K_SKIP = 0;
-	private const int WATERLINE_K_TOP  = 2;
+	private const int WATERLINE_K_TOP  = 4;
 	// Independent debug toggles:
 	//   show_fake_debug_      — green dots at fake-particle positions (J toggles body, fake dots stay)
 	//   show_waterline_debug_ — yellow waterline anchors + magenta/cyan top candidate circles
@@ -483,7 +621,7 @@ public partial class Ground : StaticBody2D
 		colorRect_.SetGpuPhysicsTexture(sph_gpu_.PhysicsTex);
 		smokeSprites_ = GetNode<SmokeSpriteRenderer>("../CanvasLayer/SubVPContainer/SubVP/SmokeSprites");
 		smokeSprites_.SetGpuTextures(sph_gpu_.PositionTex, sph_gpu_.PhysicsTex, sph_gpu_.StablePositionTex);
-		SetParticleSpritesVisible(false);
+		SetParticleSpritesVisible(true);
 		colorRect_.SetGpuMode(true);
 		sph_gpu_.ResetParticles(pos_, vel_, Position);
 		{
@@ -513,6 +651,7 @@ public partial class Ground : StaticBody2D
 
 			body_visual_[b] = new Polygon2D();
 			body_visual_[b].Color = new Color(0.3f + b * 0.15f, 0.85f - b * 0.1f, 0.4f + b * 0.15f);
+			body_visual_[b].Visible = false;
 			UpdateBodyVisual(b);
 			node.CallDeferred(Node.MethodName.AddChild, body_visual_[b]);
 		}

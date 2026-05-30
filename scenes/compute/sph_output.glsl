@@ -69,6 +69,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     vec4 ptype_boil_product;
     vec4 ptype_condense_point;
     vec4 ptype_condense_product;
+    float boundary_friction;
 };
 
 layout(set = 1, binding = 0, rgba16f) uniform image2D position_tex;

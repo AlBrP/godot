@@ -88,7 +88,7 @@ public class SphGpu
 	private const int HISTOGRAM_BUF_SIZE = N * 4;
 	private const int PREFIX_BUF_SIZE = N * 4;
 	private const int BLOCK_SUMS_BUF_SIZE = NUM_GROUPS * 4;
-	private const int PARAMS_BUF_SIZE = 368;
+	private const int PARAMS_BUF_SIZE = 384;
 
 	public void Init()
 	{
@@ -370,7 +370,8 @@ public class SphGpu
 			float pBoilPtW = -1f, float pBoilPtF = -1f, float pBoilPtS = -1f, float pBoilPtSt = -1f,
 			float pBoilProdW = -1f, float pBoilProdF = -1f, float pBoilProdS = -1f, float pBoilProdSt = -1f,
 			float pCondPtW = -1f, float pCondPtF = -1f, float pCondPtS = -1f, float pCondPtSt = -1f,
-			float pCondProdW = -1f, float pCondProdF = -1f, float pCondProdS = -1f, float pCondProdSt = -1f)
+			float pCondProdW = -1f, float pCondProdF = -1f, float pCondProdS = -1f, float pCondProdSt = -1f,
+			float boundaryFriction = 0f)
 	{
 		byte[] data = new byte[PARAMS_BUF_SIZE];
 		int offset = 0;
@@ -439,7 +440,9 @@ public class SphGpu
 		WriteFloat(data, ref offset, pCondPtS);    WriteFloat(data, ref offset, pCondPtSt);   // 336
 		WriteFloat(data, ref offset, pCondProdW);  WriteFloat(data, ref offset, pCondProdF);
 		WriteFloat(data, ref offset, pCondProdS);  WriteFloat(data, ref offset, pCondProdSt); // 352
-		// Total: 368 bytes
+		WriteFloat(data, ref offset, boundaryFriction); // 368
+		WriteFloat(data, ref offset, 0f); WriteFloat(data, ref offset, 0f); WriteFloat(data, ref offset, 0f); // pad to 384
+		// Total: 384 bytes
 		RD.BufferUpdate(params_ubuf, 0, PARAMS_BUF_SIZE, data);
 	}
 

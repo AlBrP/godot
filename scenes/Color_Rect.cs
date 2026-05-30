@@ -85,6 +85,16 @@ public partial class Color_Rect : ColorRect
 		shaderMaterial.SetShaderParameter("grid_cell_size", (double)ground_.smoothing_radius);
 		shaderMaterial.SetShaderParameter("ground_offset", ground_.Position);
 		shaderMaterial.SetShaderParameter("debug_mode", ground_.DebugModeVal);
+
+		// Per-body waterline anchors (world coords). Layout: vec4 per
+		// body = (xL, yL, xR, yR). valid_mask is a 4-bit field set by
+		// the CPU side; bit b indicates body b has a usable waterline
+		// this frame. Bodies_world: vec4 per body = (cx, cy, r, 0)
+		// so the shader can test whether a fragment is inside the body.
+		shaderMaterial.SetShaderParameter("waterlines_world", ground_.GetWaterlinesWorld());
+		shaderMaterial.SetShaderParameter("waterline_valid_mask", ground_.GetWaterlineValidMask());
+		shaderMaterial.SetShaderParameter("bodies_world", ground_.GetBodiesWorld());
+		shaderMaterial.SetShaderParameter("fake_particles", ground_.GetFakeParticlesWorld());
 	}
 
 	public override void _Input(InputEvent @event) { }

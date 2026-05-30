@@ -64,6 +64,7 @@ layout(set = 0, binding = 7, std140) uniform Params {
     vec4 ptype_boil_product;
     vec4 ptype_condense_point;
     vec4 ptype_condense_product;
+    float boundary_friction;
 };
 
 const int MAX_BODIES = 4;
@@ -144,11 +145,11 @@ void main() {
             my_temp = init_temp;
             particle_data[ti] = my_temp;
         }
-        // Uniform Newton cooling (no core protection — lets extinguishing emerge)
+        // Uniform Newton cooling (no core protection -- lets extinguishing emerge)
         my_temp -= cool_rate * sub_dt;
         my_temp = max(my_temp, ambient_temperature);
         particle_data[ti] = my_temp;
-        // Ideal gas buoyancy: rho ∝ 1/T (PV=nRT), F = g*(1 - T_ambient/T)
+        // Ideal gas buoyancy: rho prop_to 1/T (PV=nRT), F = g*(1 - T_ambient/T)
         float bf = ptype_buoyancy[my_type];
         float T_ratio = my_temp / max(ambient_temperature, 0.001);
         v.y -= gravity * bf * (T_ratio - 1.0) * sub_dt;
@@ -196,11 +197,11 @@ void main() {
         // comes from pressure_viscosity's diffusion (fire neighbours).
         // Cooling rate kept small (ptype_cooling[WATER] ~30) so the heat
         // accumulates long enough to actually cross the boil threshold.
-        // Clamp to ambient as lower bound — water never goes below it.
+        // Clamp to ambient as lower bound -- water never goes below it.
         int ti = temperature_offset(int(i));
         float my_temp_w = particle_data[ti];
         // Newly spawned water particles may have temperature 0 from
-        // residual buffer state — snap them up to ambient on the very
+        // residual buffer state -- snap them up to ambient on the very
         // first frames so subsequent diffusion uses the right baseline.
         if (my_temp_w < ambient_temperature * 0.5) my_temp_w = ambient_temperature;
         float cool_rate_w = ptype_cooling[my_type];

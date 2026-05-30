@@ -34,6 +34,10 @@ shader_parameter/spec_strength = 0.35
 shader_parameter/toon_levels = 0.0
 shader_parameter/color_band = 1.0
 shader_parameter/debug_mode = 0
+shader_parameter/waterlines_world = null
+shader_parameter/bodies_world = null
+shader_parameter/waterline_valid_mask = 0
+shader_parameter/fake_particles = null
 
 [sub_resource type="CircleShape2D" id="CircleShape2D_body"]
 radius = 50.0
