@@ -660,19 +660,10 @@ void fragment() {
 		drew = true;
 	}
 	if (!drew && debug_mode == 1) {
-		float t = clamp(total_water / (body_threshold * 1.5), 0.0, 1.0);
-		vec3 heat;
-		if (t < 0.5) heat = mix(vec3(0.0, 0.0, 0.2), vec3(0.0, 1.0, 0.0), t * 2.0);
-		else heat = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), (t - 0.5) * 2.0);
-		COLOR = vec4(heat, 1.0);
-		drew = true;
+		// placeholder -- real debug heat draw happens after fake loop below
 	}
 	if (!drew && debug_mode == 2) {
-		float t = clamp(total_water / (body_threshold * 1.5), 0.0, 1.0);
-		vec3 heat = t < 0.5 ? mix(vec3(0.0, 0.0, 0.2), vec3(0.0, 1.0, 0.0), t * 2.0)
-			: mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), (t - 0.5) * 2.0);
-		COLOR = vec4(heat, 1.0);
-		drew = true;
+		// placeholder -- real debug heat draw happens after fake loop below
 	}
 
 	// Fake-particle contribution: treat fakes identically to real water so
@@ -693,30 +684,94 @@ void fragment() {
 	// reading darker than the surrounding pool while still filling the
 	// cavity solidly.
 	//
-	// Per-fake self-weight: the outermost ring of fakes (d_fake near +15,
-	// the cavity edge) sits within Gaussian-tail reach of real-water
-	// particles just outside the cavity. Without a fade, the two kernels
-	// double up in d=0..10 and total_water spikes there -- visible as a
-	// dark "fish-tail" lobe under the body. Fading each fake by its own
-	// SDF distance d_fake (1 deep inside, 0 at the edge) cuts this
-	// overlap without removing the fake physically (so cavity dynamics
-	// stay stable) and keeps the kernel formula identical to real water
-	// -- only each fake's "weight" depends on its own state, not on the
-	// fragment's location.
-	const float FAKE_KERNEL_WEIGHT = 0.7;
-	for (int i = 0; i < FAKE_TOTAL; i++) {
-		vec2 fp = fake_particles[i];
-		if (fp.x < -1e5) continue;
-
-		int b = i / FAKE_PER_BODY;
+	// Per-fake self-weight (own-body fade): fade by d_fake against the
+	// fake's own body so the outermost ring (d_fake ~ +15, cavity edge)
+	// doesn't double up with real-water Gaussian tails just outside the
+	// cavity -- without that fade the two kernels stack in d=0..10 and
+	// total_water spikes into a "fish-tail" lobe under the body. This is
+	// driven by the fake's own position, not the fragment's.
+	// FAKE_KERNEL_WEIGHT = 0.45. The own-body fade is direction-aware
+	// (fade_upper interpolates 12..26 by facing_gap), so the per-fake
+	// weight is naturally lower on the pool-facing side (real-water tail
+	// overlap suppressed) and higher on the gap-facing side (no real
+	// water to overlap, gap needs the fill). One global scalar suffices;
+	// the asymmetry comes from the fade, not from per-fake bookkeeping.
+	const float FAKE_KERNEL_WEIGHT = 0.45;
+	// Per-fake self-weight: own-body fade only.
+	//
+	// Earlier iterations also did a neighbour-body fade loop here
+	// (smoothstep against d_other for every other body) to kill an
+	// imagined "two bodies' Gaussian tails stack in the gap" artifact.
+	// The debug heatmap proved that wrong: the actual dark lens under
+	// each body is uniform across the whole submerged hemisphere, not
+	// concentrated in the inter-body gap, so it's caused by fake over-
+	// density per body (fixed by FAKE_KERNEL_WEIGHT) rather than inter-
+	// body tail overlap. The neighbour loop cost FAKE_TOTAL * MAX_BODIES
+	// = 1280 distance() calls per fragment for nothing -- removing it
+	// brought FPS from ~50 back to the usual 170+.
+	// Per-body body-cull: a fake of body b sits at most br+15 px from
+	// body b's centre (cavity outer ring), and its Gaussian reaches
+	// another 3*sigma=27 px. So if worldPos is further than br+42 from
+	// body b's centre, NONE of b's 80 fakes can contribute and we skip
+	// the inner loop entirely. For most fragments (open pool, no nearby
+	// body) all 4 bodies cull -> zero fake work.
+	const float FAKE_CUTOFF_RADIUS = 27.0;
+	const float CAVITY_OUTER = 15.0;
+	for (int b = 0; b < MAX_BODIES_RIM; b++) {
 		float br = bodies_world[b].z;
-		float d_fake = (br > 0.1) ? distance(fp, bodies_world[b].xy) - br : -1e6;
-		float fake_self_weight = 1.0 - smoothstep(0.0, 12.0, d_fake);
+		if (br < 0.1) continue;
+		float d_body_frag = distance(worldPos, bodies_world[b].xy) - br;
+		if (d_body_frag > CAVITY_OUTER + FAKE_CUTOFF_RADIUS) continue;
 
-		vec2 pdiff = worldPos - fp;
-		total_water += particle_contrib(pdiff, inv_2sq, cutoff_sq) * FAKE_KERNEL_WEIGHT * fake_self_weight;
+		int base = b * FAKE_PER_BODY;
+		for (int i = 0; i < FAKE_PER_BODY; i++) {
+			vec2 fp = fake_particles[base + i];
+			if (fp.x < -1e5) continue;
+
+			float d_self = distance(fp, bodies_world[b].xy) - br;
+			float fake_self_weight = 1.0 - smoothstep(0.0, 12.0, d_self);
+
+			// surface_boost: cavity is single-layer fakes vs pool's multi-
+			// layer real water at the waterline. Driven by fake's own y
+			// vs body centre. Combined with F_water lifting the fake
+			// layer 5 px above the local waterline (Ground.cs), the
+			// metaball isosurface around bodies sits a few px above the
+			// open-pool surface -- the "water hugs the body" look.
+			float depth_below = max(fp.y - bodies_world[b].y, 0.0);
+			float surface_boost = 1.0 + 0.9 * exp(-depth_below * depth_below / 128.0);
+
+			vec2 pdiff = worldPos - fp;
+			total_water += particle_contrib(pdiff, inv_2sq, cutoff_sq) * FAKE_KERNEL_WEIGHT * fake_self_weight * surface_boost;
+		}
 	}
 
+
+	// Debug heat: must run AFTER fake loop so total_water includes fake
+	// contributions (otherwise the cavity-fill / under-body lens we're
+	// trying to diagnose is invisible in the heatmap).
+	// Use n = total_water * field_scale so the heat axis maps 1:1 onto
+	// the real color ramp's thresholds:
+	//   n < 0.3   -> bright/light band
+	//   n 0.3-0.75 -> light -> mid
+	//   n 0.75-1.35 -> mid -> deep
+	//   n > 1.35  -> deep (saturates)
+	// Heat color stages mirror that:
+	//   black -> blue -> cyan -> green -> yellow -> red -> magenta
+	// across n in [0, 1.6] so the deep-lens band shows up as red/magenta
+	// while the open pool sits around green/yellow.
+	if (!drew && (debug_mode == 1 || debug_mode == 2)) {
+		float n_dbg = total_water * field_scale;
+		float t = clamp(n_dbg / 1.6, 0.0, 1.0);
+		vec3 heat;
+		if (t < 0.166)      heat = mix(vec3(0.0, 0.0, 0.0), vec3(0.0, 0.0, 1.0), t / 0.166);
+		else if (t < 0.333) heat = mix(vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 1.0), (t - 0.166) / 0.166);
+		else if (t < 0.5)   heat = mix(vec3(0.0, 1.0, 1.0), vec3(0.0, 1.0, 0.0), (t - 0.333) / 0.166);
+		else if (t < 0.666) heat = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 1.0, 0.0), (t - 0.5)   / 0.166);
+		else if (t < 0.833) heat = mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), (t - 0.666) / 0.166);
+		else                heat = mix(vec3(1.0, 0.0, 0.0), vec3(1.0, 0.0, 1.0), (t - 0.833) / 0.166);
+		COLOR = vec4(heat, 1.0);
+		drew = true;
+	}
 
 	if (!drew && total_water > 0.01) {
 		float edge_width = fwidth(total_water) * 1.5;

@@ -129,7 +129,7 @@ public partial class Ground : StaticBody2D
 	// samples high and half low, the middle one lands on the cycle center.
 	// 30 @ 60Hz = 0.5s window, fully covering the eddy period. Lag is ~0.25s
 	// for body rise/fall, acceptable.
-	private const int WATERLINE_HISTORY = 30;
+	private const int WATERLINE_HISTORY = 12;
 	private float[,] waterline_hist_yL_ = new float[MAX_BODIES, WATERLINE_HISTORY];
 	private float[,] waterline_hist_yR_ = new float[MAX_BODIES, WATERLINE_HISTORY];
 	private int[] waterline_hist_count_ = new int[MAX_BODIES];
@@ -297,7 +297,7 @@ public partial class Ground : StaticBody2D
 		var arr = new Godot.Collections.Array<Vector2>();
 		const float SDF_PADDING = 1.6f;
 		const float SPACING = 10f;
-		float dt = Mathf.Min((float)GetProcessDeltaTime(), 1f / 30f);
+		float dt = paused_ ? 0f : Mathf.Min((float)GetProcessDeltaTime(), 1f / 30f);
 		if (!fake_seeded_) { SeedFakePoolInitial(SDF_PADDING, SPACING); fake_seeded_ = true; }
 
 		ulong currentFrame = Engine.GetProcessFrames();
@@ -390,6 +390,12 @@ public partial class Ground : StaticBody2D
 					// balance it. Quadratic term hardens response once a
 					// fake drifts more than a couple px above target; no
 					// hard clamp so no teleport / tangential slide.
+					// F_water: push fakes 2 px below the local waterline (soft
+					// pull, equilibrium ~3-5 px below the surface). Now that
+					// ComputeWaterlines no longer pollutes yR/yL with water
+					// from inside a neighbour body, water_y_flat is honest
+					// even in the inter-body gap and target_wy lands at the
+					// real surface.
 					{
 						float wy_pre = cy + sa2 * lp.X + ca2 * lp.Y;
 						float target_wy = water_y_flat + 2f;
@@ -1130,16 +1136,15 @@ public partial class Ground : StaticBody2D
 	// the median over K=10 still rejects a few splash outliers.
 	private void ComputeWaterlines()
 	{
-		// Sample band sits 10-35px out from the body edge. The first
-		// ~smoothing_radius (17px) ring next to the body is the strongest
-		// Akinci boundary-eddy zone -- water there circulates around the
-		// body, so picking "top" particles from that ring tracks the eddy
-		// phase (~0.3s cycle) and the rim wobbles up/down by ±5-10px.
-		// Push the window past the eddy core to sample relatively
-		// undisturbed surface, while staying close enough that the
-		// anchor still tracks the local pile around the body.
-		const float BAND_INNER = 10f;
-		const float BAND_OUTER = 35f;
+		// Sample band sits 20-60 px out from the body edge. Earlier 10-35 px
+		// landed inside the body's own splash crown after a body got
+		// knocked into the air and fell back, so the anchor latched onto
+		// the wave-trough surface (10-20 px below the rest pool) and the
+		// fake target lagged for ~1-2 s until the splash settled. 20-60 px
+		// reaches past the splash crown to the unperturbed pool, so the
+		// anchor tracks the true rest surface within one frame.
+		const float BAND_INNER = 20f;
+		const float BAND_OUTER = 60f;
 		// Pick N_PICK highest particles (smallest y in Y-down). Sort by y
 		// and drop the top K_SKIP as splash outliers, take median of rest.
 		float[] yL_top = new float[WATERLINE_N_PICK];
@@ -1162,6 +1167,29 @@ public partial class Ground : StaticBody2D
 			float xL = bx - hw_body;
 			float xR = bx + hw_body;
 
+			// Neighbour-body window-blocking: when another body overlaps this
+			// body's left or right candidate window, "water" in that window is
+			// actually leaked-in real water clinging to the lower hemisphere
+			// of the neighbour (Akinci SDF push is soft -- a thin sub-surface
+			// crust of real water lives a few px inside each body). Those
+			// crust particles sit 15-30 px BELOW the true surface, so
+			// sampling them tilts water_y_flat downward and drags fake
+			// target_wy with it -- exactly what made the gap-side waterline
+			// dip toward the inter-body cavity. Block the affected side and
+			// mirror the y from the opposite (clean) side at compute time.
+			bool xL_blocked = false, xR_blocked = false;
+			for (int b2 = 0; b2 < body_count_; b2++)
+			{
+				if (b2 == b) continue;
+				if (!body_enabled_[b2]) continue;
+				float bx2 = body_pos_[b2].X;
+				float hw2 = sdf_half_extents_[b2].X / SDF_PAD_W;
+				float b2_xL = bx2 - hw2;
+				float b2_xR = bx2 + hw2;
+				if (b2_xR > xL - BAND_OUTER && b2_xL < xL - BAND_INNER) xL_blocked = true;
+				if (b2_xR > xR + BAND_INNER && b2_xL < xR + BAND_OUTER) xR_blocked = true;
+			}
+
 			int nL = 0, nR = 0;
 			float worstL_y = float.NegativeInfinity; int worstL_i = 0;
 			float worstR_y = float.NegativeInfinity; int worstR_i = 0;
@@ -1172,7 +1200,7 @@ public partial class Ground : StaticBody2D
 				float px = pos_[i].X;
 				float py = pos_[i].Y;
 				if (py < -500f) continue;
-				if (px < xL - BAND_INNER && px >= xL - BAND_OUTER)
+				if (!xL_blocked && px < xL - BAND_INNER && px >= xL - BAND_OUTER)
 				{
 					if (nL < WATERLINE_N_PICK)
 					{
@@ -1192,7 +1220,7 @@ public partial class Ground : StaticBody2D
 						for (int j = 1; j < WATERLINE_N_PICK; j++) if (yL_top[j] > worstL_y) { worstL_y = yL_top[j]; worstL_i = j; }
 					}
 				}
-				else if (px > xR + BAND_INNER && px <= xR + BAND_OUTER)
+				else if (!xR_blocked && px > xR + BAND_INNER && px <= xR + BAND_OUTER)
 				{
 					if (nR < WATERLINE_N_PICK)
 					{
@@ -1214,23 +1242,34 @@ public partial class Ground : StaticBody2D
 				}
 			}
 
-			if (nL < WATERLINE_N_PICK || nR < WATERLINE_N_PICK) continue;
+			if (xL_blocked && xR_blocked) continue;
+			if (!xL_blocked && nL < WATERLINE_N_PICK) continue;
+			if (!xR_blocked && nR < WATERLINE_N_PICK) continue;
 
 			// Sort y ascending (smallest = highest in Y-down). Drop the
 			// first K_SKIP (splash outliers). Average the next K_TOP -- the
 			// surface layer mean -- instead of taking the median which falls
 			// into layer-2 when the surface is only 1-2 particles thick.
-			float[] sortL = new float[WATERLINE_N_PICK];
-			Array.Copy(yL_top, sortL, WATERLINE_N_PICK); Array.Sort(sortL);
-			float sumL = 0f;
-			for (int j = WATERLINE_K_SKIP; j < WATERLINE_K_SKIP + WATERLINE_K_TOP; j++) sumL += sortL[j];
-			float medL = sumL / WATERLINE_K_TOP;
-
-			float[] sortR = new float[WATERLINE_N_PICK];
-			Array.Copy(yR_top, sortR, WATERLINE_N_PICK); Array.Sort(sortR);
-			float sumR = 0f;
-			for (int j = WATERLINE_K_SKIP; j < WATERLINE_K_SKIP + WATERLINE_K_TOP; j++) sumR += sortR[j];
-			float medR = sumR / WATERLINE_K_TOP;
+			float medL = 0f, medR = 0f;
+			if (!xL_blocked)
+			{
+				float[] sortL = new float[WATERLINE_N_PICK];
+				Array.Copy(yL_top, sortL, WATERLINE_N_PICK); Array.Sort(sortL);
+				float sumL = 0f;
+				for (int j = WATERLINE_K_SKIP; j < WATERLINE_K_SKIP + WATERLINE_K_TOP; j++) sumL += sortL[j];
+				medL = sumL / WATERLINE_K_TOP;
+			}
+			if (!xR_blocked)
+			{
+				float[] sortR = new float[WATERLINE_N_PICK];
+				Array.Copy(yR_top, sortR, WATERLINE_N_PICK); Array.Sort(sortR);
+				float sumR = 0f;
+				for (int j = WATERLINE_K_SKIP; j < WATERLINE_K_SKIP + WATERLINE_K_TOP; j++) sumR += sortR[j];
+				medR = sumR / WATERLINE_K_TOP;
+			}
+			// Mirror the blocked side from the clean side.
+			if (xL_blocked) medL = medR;
+			if (xR_blocked) medR = medL;
 
 			waterlines_[b].xL = xL;
 			waterlines_[b].xR = xR;
@@ -1349,7 +1388,7 @@ public partial class Ground : StaticBody2D
 			if (key.Keycode == Key.T) toon_levels = toon_levels < 0.5f ? 4f : 0f;
 			if (key.Keycode == Key.V) { show_sliders_ = !show_sliders_; if (slider_panel_ != null) slider_panel_.Visible = show_sliders_; }
 			if (key.Keycode == Key.F) { fire_mode_ = !fire_mode_; if (fire_mode_) smoke_mode_ = false; ResetParticles(); sph_gpu_.ResetParticles(pos_, vel_, Position); }
-			if (key.Keycode == Key.Key1) { if (fire_mode_) debug_mode_ = (debug_mode_ + 1) % 3; }
+			if (key.Keycode == Key.Key1) { debug_mode_ = (debug_mode_ + 1) % 3; }
 			if (key.Keycode == Key.M) { smoke_mode_ = !smoke_mode_; if (smoke_mode_) fire_mode_ = false; ResetParticles(); sph_gpu_.ResetParticles(pos_, vel_, Position); }
 			if (key.Keycode == Key.G) { debug_sprites_ = !debug_sprites_; SetParticleSpritesVisible(debug_sprites_); }
 			if (key.Keycode == Key.N && body_count_ > 0) { current_body_ = (current_body_ + 1) % body_count_; SwitchSdfShape(); }
