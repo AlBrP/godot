@@ -1145,6 +1145,16 @@ public partial class Ground : StaticBody2D
 		// anchor tracks the true rest surface within one frame.
 		const float BAND_INNER = 20f;
 		const float BAND_OUTER = 60f;
+		// Vertical y-window around the body itself rejects floating water
+		// above it (grabbed/dropping blob) that would otherwise drift into
+		// the x-band and hijack the y-min pick. Anchoring to body_pos (not
+		// hist median) prevents the deadlock where prolonged splash drags
+		// hist y off the real surface, the window then misses the surface,
+		// no candidates qualify, hist never updates -- waterline stays
+		// invalid until reset. Body tracks the pool surface during normal
+		// interaction so the window always captures the true surface.
+		const float Y_WIN_UP = 30f;
+		const float Y_WIN_DOWN = 200f;
 		// Pick N_PICK highest particles (smallest y in Y-down). Sort by y
 		// and drop the top K_SKIP as splash outliers, take median of rest.
 		float[] yL_top = new float[WATERLINE_N_PICK];
@@ -1164,6 +1174,7 @@ public partial class Ground : StaticBody2D
 			// candidates from inside its footprint.
 			const float SDF_PAD_W = 1.6f;
 			float hw_body = sdf_half_extents_[b].X / SDF_PAD_W;
+			float hh_body = sdf_half_extents_[b].Y / SDF_PAD_W;
 			float xL = bx - hw_body;
 			float xR = bx + hw_body;
 
@@ -1194,12 +1205,19 @@ public partial class Ground : StaticBody2D
 			float worstL_y = float.NegativeInfinity; int worstL_i = 0;
 			float worstR_y = float.NegativeInfinity; int worstR_i = 0;
 
+			// Window tracks the body, not the surface history. Floating
+			// blobs above the body top (>30 px) are rejected; everything
+			// from body top down to 200 px below body bottom passes.
+			float yWinMin = body_pos_[b].Y - hh_body - Y_WIN_UP;
+			float yWinMax = body_pos_[b].Y + hh_body + Y_WIN_DOWN;
+
 			for (int i = 0; i < ball_nums_; i++)
 			{
 				if (particle_types_[i] != 0) continue;
 				float px = pos_[i].X;
 				float py = pos_[i].Y;
 				if (py < -500f) continue;
+				if (py < yWinMin || py > yWinMax) continue;
 				if (!xL_blocked && px < xL - BAND_INNER && px >= xL - BAND_OUTER)
 				{
 					if (nL < WATERLINE_N_PICK)
