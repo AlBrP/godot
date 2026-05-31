@@ -42,12 +42,12 @@ uniform sampler2D physics_texture;
 // usable waterline this frame. bodies_world[b] = (cx, cy, r, 0) is the
 // body center + radius, used to test whether a fragment is inside.
 const int MAX_BODIES_RIM = 4;
-const int FAKE_PER_BODY = 80;
-const int FAKE_TOTAL = 320; // MAX_BODIES_RIM * FAKE_PER_BODY
+const int FAKE_PER_BODY = 120;
+const int FAKE_TOTAL = 480; // MAX_BODIES_RIM * FAKE_PER_BODY
 uniform vec4 waterlines_world[4];
 uniform vec4 bodies_world[4];
 uniform int waterline_valid_mask = 0;
-uniform vec2 fake_particles[320];
+uniform vec2 fake_particles[480];
 
 // Particle type constants
 const int PTYPE_WATER = 0;

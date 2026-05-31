@@ -199,7 +199,7 @@ public partial class Ground : StaticBody2D
 	// translating/rotating the body automatically moves the cluster with
 	// it without re-seeding. fake_pos_local_[b, i] is in pixels relative
 	// to body center; fake_vel_local_[b, i] is local px/s.
-	private const int FAKE_PER_BODY = 80;
+	private const int FAKE_PER_BODY = 120;
 	private const int FAKE_TOTAL = MAX_BODIES * FAKE_PER_BODY;
 	private Vector2[,] fake_pos_local_ = new Vector2[MAX_BODIES, FAKE_PER_BODY];
 	private Vector2[,] fake_vel_local_ = new Vector2[MAX_BODIES, FAKE_PER_BODY];
@@ -296,7 +296,7 @@ public partial class Ground : StaticBody2D
 	{
 		var arr = new Godot.Collections.Array<Vector2>();
 		const float SDF_PADDING = 1.6f;
-		const float SPACING = 10f;
+		const float SPACING = 8f;
 		float dt = paused_ ? 0f : Mathf.Min((float)GetProcessDeltaTime(), 1f / 30f);
 		if (!fake_seeded_) { SeedFakePoolInitial(SDF_PADDING, SPACING); fake_seeded_ = true; }
 
