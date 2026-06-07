@@ -79,6 +79,12 @@ public partial class Ground : StaticBody2D
 	[Export] public NodePath BodyPath1 { get; set; }
 	[Export] public NodePath BodyPath2 { get; set; }
 	[Export] public NodePath BodyPath3 { get; set; }
+	// Optional explicit paths to the render sinks. Empty -> _Ready falls back
+	// to the legacy "../CanvasLayer/SubVPContainer/SubVP/{ColorRect,SmokeSprites}"
+	// relative path that works when Ground is a child of main.tscn. Set these
+	// in the inspector if running ground.tscn standalone for debugging.
+	[Export] public NodePath ColorRectPath { get; set; }
+	[Export] public NodePath SmokeSpritesPath { get; set; }
 	[Export] public float BodyRadius { get; set; } = 50f;
 	[Export] public float BodyBV { get; set; } = 100f;        // boundary_volume
 	[Export] public float BodyBPS { get; set; } = 0.03f;       // boundary_pressure_scale
@@ -134,6 +140,8 @@ public partial class Ground : StaticBody2D
 	private float[,] waterline_hist_yR_ = new float[MAX_BODIES, WATERLINE_HISTORY];
 	private int[] waterline_hist_count_ = new int[MAX_BODIES];
 	private int[] waterline_hist_idx_ = new int[MAX_BODIES];
+	private int[] waterline_soft_fault_streak_ = new int[MAX_BODIES];
+	private int[] waterline_airborne_streak_ = new int[MAX_BODIES];
 
 	// Returns waterlines in world coordinates (Ground-local + Position).
 	// Output layout for the shader: vec4 per body = (xL, yL, xR, yR);
@@ -596,6 +604,54 @@ public partial class Ground : StaticBody2D
 	private Vector2[,] waterline_picks_left_ = new Vector2[MAX_BODIES, WATERLINE_N_PICK];
 	private Vector2[,] waterline_picks_right_ = new Vector2[MAX_BODIES, WATERLINE_N_PICK];
 
+	private T ResolveRenderNode<T>(NodePath exportPath, string fallbackRel) where T : class
+	{
+		if (exportPath != null && !exportPath.IsEmpty)
+		{
+			var n = GetNodeOrNull(exportPath) as T;
+			if (n != null) return n;
+		}
+		return GetNodeOrNull(fallbackRel) as T;
+	}
+
+	// Bucketed-min median of water surface Y across the whole pool. The
+	// per-body waterline anchor used to come from the hist median, which
+	// is a feedback loop: splash sneaks into the candidate window ->
+	// hist drifts -> next-frame anchor drifts -> more splash passes ->
+	// silent deadlock with the line stuck at splash height (see memory
+	// "反馈环 anchor 会 deadlock"). This is an open-loop estimate -- it
+	// looks at the whole pool every frame, so a few rogue buckets
+	// (splash/grabbed-blob) can't corrupt it past the bucket median.
+	// Returns NaN when too few buckets have water (e.g. empty pool).
+	private float ComputeGlobalPondY()
+	{
+		const int N_BUCKETS = 64;
+		float xMax = bounds_max_.X;
+		if (xMax < 1f) return float.NaN;
+		float bucket_w = xMax / N_BUCKETS;
+		float[] bucket_min = new float[N_BUCKETS];
+		for (int b = 0; b < N_BUCKETS; b++) bucket_min[b] = float.PositiveInfinity;
+		for (int i = 0; i < ball_nums_; i++)
+		{
+			if (particle_types_[i] != 0) continue;
+			float py = pos_[i].Y;
+			if (py < -500f) continue;
+			float px = pos_[i].X;
+			int bx = (int)(px / bucket_w);
+			if (bx < 0) bx = 0; else if (bx >= N_BUCKETS) bx = N_BUCKETS - 1;
+			if (py < bucket_min[bx]) bucket_min[bx] = py;
+		}
+		int vc = 0;
+		float[] vals = new float[N_BUCKETS];
+		for (int b = 0; b < N_BUCKETS; b++)
+		{
+			if (float.IsFinite(bucket_min[b])) vals[vc++] = bucket_min[b];
+		}
+		if (vc < 4) return float.NaN;
+		Array.Sort(vals, 0, vc);
+		return vals[vc / 2];
+	}
+
 	public override void _Ready()
 	{
 		ProcessMode = ProcessModeEnum.Always;
@@ -620,12 +676,21 @@ public partial class Ground : StaticBody2D
 			{ var s = cs.GetChild(0) as Sprite2D; if (s != null) s.Visible = false; }
 		}
 
-		colorRect_ = GetNode<Color_Rect>("../CanvasLayer/SubVPContainer/SubVP/ColorRect");
+		colorRect_ = ResolveRenderNode<Color_Rect>(ColorRectPath, "../CanvasLayer/SubVPContainer/SubVP/ColorRect");
+		smokeSprites_ = ResolveRenderNode<SmokeSpriteRenderer>(SmokeSpritesPath, "../CanvasLayer/SubVPContainer/SubVP/SmokeSprites");
+		if (colorRect_ == null || smokeSprites_ == null)
+		{
+			GD.PrintErr("[Ground] Render sinks not found under '../CanvasLayer/SubVPContainer/SubVP/'. " +
+				"Run main.tscn (F5), or set ColorRectPath/SmokeSpritesPath on Ground when running ground.tscn standalone. " +
+				"Disabling Ground processing.");
+			SetProcess(false);
+			SetPhysicsProcess(false);
+			return;
+		}
 		sph_gpu_ = new SphGpu();
 		sph_gpu_.Init();
 		colorRect_.SetGpuTextures(sph_gpu_.PositionTex, sph_gpu_.HashLookupTex);
 		colorRect_.SetGpuPhysicsTexture(sph_gpu_.PhysicsTex);
-		smokeSprites_ = GetNode<SmokeSpriteRenderer>("../CanvasLayer/SubVPContainer/SubVP/SmokeSprites");
 		smokeSprites_.SetGpuTextures(sph_gpu_.PositionTex, sph_gpu_.PhysicsTex, sph_gpu_.StablePositionTex);
 		SetParticleSpritesVisible(true);
 		colorRect_.SetGpuMode(true);
@@ -1162,10 +1227,20 @@ public partial class Ground : StaticBody2D
 		float[] yR_top = new float[WATERLINE_N_PICK];
 		float[] xR_top = new float[WATERLINE_N_PICK];
 
+		// Open-loop pool-surface estimate, computed once per call. See
+		// ComputeGlobalPondY's comment for the rationale. Replaces the
+		// previous hist-feedback anchor that silently drifted into splash
+		// drops after the body was repeatedly kicked airborne.
+		float global_pond_y = ComputeGlobalPondY();
+
 		for (int b = 0; b < MAX_BODIES; b++)
 		{
-			waterlines_[b].valid = false;
-			if (!body_enabled_[b]) continue;
+			// Fix 2 (2026-06-06): default to invalid only on hard-fault
+			// resets; soft faults below leave waterlines_[b] untouched so
+			// the previous frame's yL/yR/valid keep driving the fake
+			// render. Otherwise a one-frame surface-y gate dropout makes
+			// fake particles strobe (usek "假粒子阵频闪").
+			if (!body_enabled_[b]) { waterlines_[b].valid = false; continue; }
 
 			float bx = body_pos_[b].X;
 			// Per-body horizontal half-width: box bodies are wider than
@@ -1211,6 +1286,77 @@ public partial class Ground : StaticBody2D
 			float yWinMin = body_pos_[b].Y - hh_body - Y_WIN_UP;
 			float yWinMax = body_pos_[b].Y + hh_body + Y_WIN_DOWN;
 
+			// Fix 2 (2026-06-06, revised 2026-06-07): tight surface-y gate
+			// against an OPEN-LOOP pond-surface estimate (global_pond_y).
+			// The original revision used hist median as anchor, which
+			// turned out to be the same feedback-loop deadlock pattern
+			// from commit 12ea21c -- splash leaks into hist over a few
+			// frames, anchor drifts up, more splash passes the now-wider-
+			// effective gate, line stuck at splash height even after the
+			// body is airborne. global_pond_y is bucketed-min-median over
+			// the whole pool, so a handful of rogue buckets cannot pull
+			// it off the real surface; replacing the anchor cuts the
+			// feedback loop entirely. First-frame / empty-pool case (NaN)
+			// skips this gate so the line can still bootstrap from the
+			// body-anchored y-window.
+			//
+			// Tolerance budget: SPH surface micro-oscillation is up to
+			// ~25 px peak-to-peak in steady state, plus body bobbing and
+			// wave-from-poke add another ~15 px. Set TOL=40 to fit the
+			// honest signal without letting splash drops (which sit
+			// 60-200 px above surface) through.
+			//
+			// Stuck-anchor escape is no longer relevant (the anchor
+			// can't get stuck now), but the FAULT_GIVE_UP streak is
+			// still useful: when the gate persistently kills candidates
+			// for unrelated reasons (e.g. body pushed entirely out of
+			// pool surface area), clearing hist lets the next valid
+			// frame bootstrap cleanly without 5+ frames of accumulated
+			// stale yL/yR drag-along.
+			const float SURFACE_Y_TOL = 40f;
+			const int FAULT_GIVE_UP = 6;
+			bool has_anchor = !float.IsNaN(global_pond_y);
+			float anchor_y = has_anchor ? global_pond_y : 0f;
+
+			// Fix 1.5 (2026-06-07): early open-loop airborne gate with
+			// debounce. Runs BEFORE candidate collection so a body flung
+			// so high its candidate window misses the real surface is
+			// invalidated cleanly. Same predicate as the post-pipeline
+			// Fix 1, just using the open-loop estimate instead of
+			// (medL+medR)/2; Fix 1 stays as a second-stage check.
+			//
+			// Debounce rationale (2026-06-07, user feedback): when the
+			// body is interacted with from directly below and slams the
+			// surface, the wave from the impact pushes global_pond_y up
+			// (smaller y) by 20-30 px for 1-3 frames at the peak. During
+			// that brief window the predicate "by_bottom < pond - 10"
+			// can flip true even though the body is still in the pool.
+			// Without debounce the line/fake render flickers off and on
+			// once per wave cycle. AIRBORNE_STREAK_THRESH=3 absorbs up
+			// to ~50 ms of transient peaks while still invalidating
+			// within 4 frames when the body is genuinely airborne (a
+			// real kick takes the body 100+ px out of the pool, well
+			// beyond what a wave can pretend).
+			const int AIRBORNE_STREAK_THRESH = 3;
+			if (has_anchor && body_pos_[b].Y + hh_body < global_pond_y - 10f)
+			{
+				waterline_airborne_streak_[b]++;
+				if (waterline_airborne_streak_[b] > AIRBORNE_STREAK_THRESH)
+				{
+					waterlines_[b].valid = false;
+					waterline_hist_count_[b] = 0;
+					waterline_hist_idx_[b] = 0;
+					waterline_soft_fault_streak_[b] = 0;
+					waterline_airborne_streak_[b] = 0;
+				}
+				// Transient peak (or first frames of a real lift-off):
+				// skip this frame's candidate work, leave previous
+				// frame's yL/yR/valid untouched, let the next 1-3
+				// frames decide whether this was a wave or a real lift.
+				continue;
+			}
+			waterline_airborne_streak_[b] = 0;
+
 			for (int i = 0; i < ball_nums_; i++)
 			{
 				if (particle_types_[i] != 0) continue;
@@ -1218,6 +1364,7 @@ public partial class Ground : StaticBody2D
 				float py = pos_[i].Y;
 				if (py < -500f) continue;
 				if (py < yWinMin || py > yWinMax) continue;
+				if (has_anchor && Mathf.Abs(py - anchor_y) > SURFACE_Y_TOL) continue;
 				if (!xL_blocked && px < xL - BAND_INNER && px >= xL - BAND_OUTER)
 				{
 					if (nL < WATERLINE_N_PICK)
@@ -1260,9 +1407,109 @@ public partial class Ground : StaticBody2D
 				}
 			}
 
-			if (xL_blocked && xR_blocked) continue;
-			if (!xL_blocked && nL < WATERLINE_N_PICK) continue;
-			if (!xR_blocked && nR < WATERLINE_N_PICK) continue;
+			// Fix 6 (2026-06-07): submerged-body fallback. Runs after
+			// candidate collection but BEFORE any fault path. When water
+			// is rushing in to surround the body but the BAND_INNER..
+			// BAND_OUTER ring doesn't yet hold a full 5+5 candidate set
+			// (asymmetric fill, water still travelling), the line gets
+			// stuck invalid and the fake render snaps in all-at-once
+			// once enough candidates arrive (user feedback: "过了某个
+			// 临界突然生成一堆假粒子"). Cheap O(N) disk-density check:
+			// if >=THRESH water particles sit within hh_body+30 of the
+			// body centre AND the body is at or below the open-loop pond
+			// surface, the body is genuinely submerged enough to deserve
+			// fake -- pin yL=yR=global_pond_y and continue. Threshold 8
+			// (revised down from 20 on 2026-06-07-pm) accommodates the
+			// "water still arriving from one side" case where only a
+			// 60-90 degree arc of the body has water around it.
+			const int FALLBACK_NEAR_THRESH = 8;
+			bool insufficient = (!xL_blocked && nL < WATERLINE_N_PICK) || (!xR_blocked && nR < WATERLINE_N_PICK) || xL_blocked || xR_blocked;
+			if (has_anchor && insufficient && body_pos_[b].Y + hh_body > global_pond_y - 10f)
+			{
+				int near = 0;
+				float bxF = body_pos_[b].X;
+				float byF = body_pos_[b].Y;
+				float rF = hh_body + 30f;
+				float rF2 = rF * rF;
+				for (int i2 = 0; i2 < ball_nums_; i2++)
+				{
+					if (particle_types_[i2] != 0) continue;
+					float dx = pos_[i2].X - bxF;
+					float dy = pos_[i2].Y - byF;
+					if (dx * dx + dy * dy < rF2)
+					{
+						near++;
+						if (near >= FALLBACK_NEAR_THRESH) break;
+					}
+				}
+				if (near >= FALLBACK_NEAR_THRESH)
+				{
+					waterlines_[b].xL = xL;
+					waterlines_[b].xR = xR;
+					waterlines_[b].yL = global_pond_y;
+					waterlines_[b].yR = global_pond_y;
+					waterlines_[b].valid = true;
+					int hi6 = waterline_hist_idx_[b];
+					waterline_hist_yL_[b, hi6] = global_pond_y;
+					waterline_hist_yR_[b, hi6] = global_pond_y;
+					waterline_hist_idx_[b] = (hi6 + 1) % WATERLINE_HISTORY;
+					if (waterline_hist_count_[b] < WATERLINE_HISTORY) waterline_hist_count_[b]++;
+					waterline_soft_fault_streak_[b] = 0;
+					waterline_airborne_streak_[b] = 0;
+					for (int j = 0; j < WATERLINE_N_PICK; j++)
+					{
+						waterline_picks_left_[b, j]  = new Vector2(xL, global_pond_y);
+						waterline_picks_right_[b, j] = new Vector2(xR, global_pond_y);
+					}
+					continue;
+				}
+			}
+
+			// Fix 2 (2026-06-06): every invalid path below decides whether
+			// to reset hist AND whether to reset valid. Hard faults (no
+			// neighbour-clean side, both blocked, body lifted out of
+			// water) reset BOTH so the line/fake disappear immediately
+			// and the next valid frame bootstraps fresh. Soft faults
+			// (the surface-y gate transiently drops candidate count
+			// below N_PICK because of a wave or finger-poke) keep BOTH
+			// so the previous frame's anchor and valid carry over --
+			// otherwise valid/invalid flickers every few frames and the
+			// fake render strobes (user feedback "轻推球周围的水, 假粒子阵频闪").
+			if (xL_blocked && xR_blocked) { waterlines_[b].valid = false; waterline_hist_count_[b] = 0; waterline_hist_idx_[b] = 0; waterline_soft_fault_streak_[b] = 0; continue; }
+			// Fix 4 (2026-06-06): treat an empty/sparse window the same as a
+			// body-blocked one. Wall-adjacent body has no water on the
+			// wall-facing side -- nL=0 -- so the unmodified "not blocked AND
+			// nL < N_PICK -> give up" path discarded a perfectly valid
+			// mirror opportunity. Promoting "no water" to blocked routes
+			// vertical-wall through the existing mirror logic. Threshold 3
+			// (not 0) so one stray splash particle doesn't count as
+			// "water there" and try to anchor the line on a floating drop.
+			// Solves test case E一 (球贴墙完全没水位线没假粒子).
+			if (!xL_blocked && nL < 3) { xL_blocked = true; }
+			if (!xR_blocked && nR < 3) { xR_blocked = true; }
+			if (xL_blocked && xR_blocked) { waterlines_[b].valid = false; waterline_hist_count_[b] = 0; waterline_hist_idx_[b] = 0; waterline_soft_fault_streak_[b] = 0; continue; }
+			// Soft fault: surface-y gate killed too many candidates this
+			// frame. Skip without touching hist OR valid the first few
+			// frames, but if it persists past FAULT_GIVE_UP the anchor
+			// is probably bad -- clear hist so next frame re-bootstraps
+			// from the wide body-anchored window. Do NOT clear valid:
+			// the streak is the main render-flicker source (soft faults
+			// queue up during waves and trigger the cliff at frame 7),
+			// so keep the previous frame's line visible while a fresh
+			// anchor is being found. Worst case is a 1-2 frame visual
+			// lag, which is invisible compared to a hard valid->invalid
+			// flicker.
+			if ((!xL_blocked && nL < WATERLINE_N_PICK) || (!xR_blocked && nR < WATERLINE_N_PICK))
+			{
+				waterline_soft_fault_streak_[b]++;
+				if (waterline_soft_fault_streak_[b] > FAULT_GIVE_UP)
+				{
+					waterline_hist_count_[b] = 0;
+					waterline_hist_idx_[b] = 0;
+					waterline_soft_fault_streak_[b] = 0;
+				}
+				continue;
+			}
 
 			// Sort y ascending (smallest = highest in Y-down). Drop the
 			// first K_SKIP (splash outliers). Average the next K_TOP -- the
@@ -1289,6 +1536,41 @@ public partial class Ground : StaticBody2D
 			if (xL_blocked) medL = medR;
 			if (xR_blocked) medR = medL;
 
+			// Fix 5 (2026-06-07): two-sided median sanity. The xL/xR_blocked
+			// mirror handles geometry-based pollution (neighbour body
+			// overlaps the window); this handles value-based pollution
+			// (a hovering water blob / splash crown sits in the x-window
+			// above the real surface and tugs that side's median upward
+			// in screen Y). Symptom: tilted yellow waterline + (in the
+			// extreme) Fix 1 below mis-reading surf_approx as above the
+			// body bottom and failing to mark the line invalid when the
+			// body is actually airborne. Cure: when |medL-medR| exceeds
+			// MED_DIFF_GATE, mirror the contaminated (smaller-y =
+			// visually higher) side from the deeper side, then let the
+			// rest of the pipeline (Fix 1, hist) run on consistent
+			// values. 30 px is well above honest cross-pool slope (waves
+			// + body bob ~15 px peak-to-peak) and well below the typical
+			// contamination delta (hovering blob sits 50-150 px above).
+			const float MED_DIFF_GATE = 30f;
+			if (Mathf.Abs(medL - medR) > MED_DIFF_GATE)
+			{
+				if (medL > medR) medR = medL;
+				else medL = medR;
+			}
+
+			// Fix 1 (2026-06-06): body-in-water sanity gate. Candidates only
+			// describe a real waterline when the body is actually touching the
+			// pool. If body bottom is more than 10 px ABOVE the candidate
+			// surface, what we picked is splash residue or wall-side water
+			// that happened to fall into the x-band -- midpoint is fake. Mark
+			// invalid (debug line hidden, submerged gate fails, no fake). No
+			// feedback loop: uses current-frame medL/medR and body physics
+			// position, hist isn't touched until after this check passes.
+			// Solves test cases B二 (球被踢飞水位线没消失) and B四 (球冲高黄线偶发出现).
+			float surf_approx = (medL + medR) * 0.5f;
+			float by_bottom = body_pos_[b].Y + hh_body;
+			if (by_bottom < surf_approx - 10f) { waterlines_[b].valid = false; waterline_hist_count_[b] = 0; waterline_hist_idx_[b] = 0; waterline_soft_fault_streak_[b] = 0; continue; }
+
 			waterlines_[b].xL = xL;
 			waterlines_[b].xR = xR;
 			// Push raw median into ring buffer, then take temporal median
@@ -1306,6 +1588,7 @@ public partial class Ground : StaticBody2D
 			waterlines_[b].yL = hc % 2 == 1 ? hyL[hc / 2] : (hyL[hc / 2 - 1] + hyL[hc / 2]) * 0.5f;
 			waterlines_[b].yR = hc % 2 == 1 ? hyR[hc / 2] : (hyR[hc / 2 - 1] + hyR[hc / 2]) * 0.5f;
 			waterlines_[b].valid = true;
+			waterline_soft_fault_streak_[b] = 0;
 
 			for (int j = 0; j < WATERLINE_N_PICK; j++)
 			{
