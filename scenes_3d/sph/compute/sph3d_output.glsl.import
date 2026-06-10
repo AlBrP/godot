@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://bqw046ighxkb1"
+path="res://.godot/imported/sph3d_output.glsl-2c08d98a6b21bb0539763a225394ef57.res"
+
+[deps]
+
+source_file="res://scenes_3d/sph/compute/sph3d_output.glsl"
+dest_files=["res://.godot/imported/sph3d_output.glsl-2c08d98a6b21bb0539763a225394ef57.res"]
+
+[params]
+

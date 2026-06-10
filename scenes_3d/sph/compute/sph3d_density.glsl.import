@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://1emq5fk3rh4a"
+path="res://.godot/imported/sph3d_density.glsl-ef06ef6dd11a57d30d55abe7b4ea4d16.res"
+
+[deps]
+
+source_file="res://scenes_3d/sph/compute/sph3d_density.glsl"
+dest_files=["res://.godot/imported/sph3d_density.glsl-ef06ef6dd11a57d30d55abe7b4ea4d16.res"]
+
+[params]
+

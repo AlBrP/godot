@@ -2,3 +2,6 @@
 .godot/
 export/
 /android/
+
+# Claude Code worktrees
+.claude/worktrees/
